@@ -1,0 +1,3172 @@
+local player = game.Players.LocalPlayer
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local CONFIG = {
+    PARTNER_NAME = "TSQ",
+    AUTO_ACCEPT_DELAY = 0.2,
+    AUTO_CONFIRM_DELAY = 0.3,
+    TRADE_REQUEST_TIMEOUT = 30,
+}
+
+shared.MM2LocalTradeState = shared.MM2LocalTradeState or {
+    Weapons = {},
+    Pets = {},
+    Misc = {},
+}
+shared.MM2LocalTradeOwned = shared.MM2LocalTradeState
+shared.MM2LocalTradeSlots = shared.MM2LocalTradeSlots or {}
+shared.MM2LocalTradeTheirState = shared.MM2LocalTradeTheirState or {
+    Weapons = {},
+    Pets = {},
+    Misc = {},
+}
+shared.MM2LocalTradeTheirSlots = shared.MM2LocalTradeTheirSlots or {}
+
+local previewFrame
+local previewList
+local previewCountLabel
+local previewEmptyLabel
+local rebuildLocalTradePreview
+local getTradeGui
+local refreshLocalTradeGui
+local localTradeSlotConnections = {}
+local selectedItem
+local getOwnedCount
+local selectedTheirItem
+local theirPickerFrame
+local refreshTheirPicker
+local tradeHubGui
+local tradeHubFrame
+local tradeHubTargetBox
+local tradeHubTitleLabel
+local tradeHubStatusLabel
+local tradeHubAcceptBtn
+local tradeHubTargetLabel
+local tradeHubTimerLabel
+local tradeHubOpenBtn
+local tradeHubSession = {
+    Active = false,
+    TargetName = "",
+    Accepted = false,
+    Countdown = 0,
+}
+local tradeHubCountdownToken = 0
+local TradeModule
+local TradeGUI
+local TradeRemote
+local mockState = {
+    activeTradeRequests = {},
+    currentTradeRequest = nil,
+    tradeActive = false,
+    tradePartner = nil,
+    lastOffer = nil,
+}
+local tradeEventsHooked = false
+local initTradeSystem
+local openRealTradeGUI
+local autoAcceptTradeRequest
+local autoConfirmTrade
+local simulateTradeRequest
+local hookTradeEvents
+
+local function refreshLocalTradePreview()
+    if shared.MM2RefreshTradeInventory then
+        pcall(shared.MM2RefreshTradeInventory)
+    end
+end
+
+-- ═══════════════════════════════════════
+--        ЧЁРНО-БЕЛАЯ СХЕМА
+-- ═══════════════════════════════════════
+local COLORS = {
+    BG          = Color3.fromRGB(8, 8, 8),
+    Panel       = Color3.fromRGB(14, 14, 14),
+    Card        = Color3.fromRGB(22, 22, 22),
+    CardHover   = Color3.fromRGB(38, 38, 38),
+    CardSel     = Color3.fromRGB(32, 32, 32),
+    Neon        = Color3.fromRGB(230, 230, 230),
+    NeonBright  = Color3.fromRGB(255, 255, 255),
+    NeonDark    = Color3.fromRGB(140, 140, 140),
+    NeonGlow    = Color3.fromRGB(255, 255, 255),
+    NeonCyan    = Color3.fromRGB(180, 180, 180),
+    Success     = Color3.fromRGB(200, 200, 200),
+    Error       = Color3.fromRGB(255, 80, 80),
+    Text        = Color3.fromRGB(245, 245, 245),
+    TextSub     = Color3.fromRGB(160, 160, 160),
+    TextDim     = Color3.fromRGB(90, 90, 90),
+    Border      = Color3.fromRGB(55, 55, 55),
+}
+
+-- ═══════════════════════════════════════
+--              УТИЛИТЫ
+-- ═══════════════════════════════════════
+local function tween(obj, t, props, style, dir)
+    style = style or Enum.EasingStyle.Quart
+    dir   = dir   or Enum.EasingDirection.Out
+    return TweenService:Create(obj, TweenInfo.new(t, style, dir), props)
+end
+
+local outerGlow
+
+local function makeDraggable(handle, frame)
+    local dragging, dragStart, startPos = false, nil, nil
+    handle.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = inp.Position; startPos = frame.Position
+            inp.Changed:Connect(function()
+                if inp.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local d = inp.Position - dragStart
+            local newX = startPos.X.Offset + d.X
+            local newY = startPos.Y.Offset + d.Y
+            frame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+            if outerGlow then
+                outerGlow.Position = UDim2.new(startPos.X.Scale, newX - 22, startPos.Y.Scale, newY - 22)
+            end
+        end
+    end)
+end
+
+local function addRipple(button)
+    button.MouseButton1Click:Connect(function()
+        local ripple = Instance.new("Frame")
+        ripple.Size = UDim2.new(0, 0, 0, 0)
+        ripple.Position = UDim2.new(0.5, 0, 0.5, 0)
+        ripple.AnchorPoint = Vector2.new(0.5, 0.5)
+        ripple.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        ripple.BackgroundTransparency = 0.7
+        ripple.ZIndex = button.ZIndex + 1
+        ripple.Parent = button
+        Instance.new("UICorner", ripple).CornerRadius = UDim.new(1, 0)
+        tween(ripple, 0.55, {Size = UDim2.new(2.2, 0, 2.2, 0), BackgroundTransparency = 1}, Enum.EasingStyle.Quad):Play()
+        game:GetService("Debris"):AddItem(ripple, 0.6)
+    end)
+end
+
+-- ═══════════════════════════════════════
+--   ScreenGui для ЛОАДЕРА
+-- ═══════════════════════════════════════
+local loaderGui = Instance.new("ScreenGui")
+loaderGui.Name = "MM2Loader"
+loaderGui.ResetOnSpawn = false
+loaderGui.IgnoreGuiInset = true
+loaderGui.DisplayOrder = 9999
+loaderGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+loaderGui.Parent = player:WaitForChild("PlayerGui")
+
+local loaderFrame = Instance.new("Frame")
+loaderFrame.Size = UDim2.new(1, 0, 1, 0)
+loaderFrame.Position = UDim2.new(0, 0, 0, 0)
+loaderFrame.BackgroundColor3 = Color3.fromRGB(4, 4, 4)
+loaderFrame.BorderSizePixel = 0
+loaderFrame.ZIndex = 1
+loaderFrame.Parent = loaderGui
+
+local gridLines = Instance.new("Frame")
+gridLines.Size = UDim2.new(1, 0, 1, 0)
+gridLines.BackgroundTransparency = 1
+gridLines.ZIndex = 2
+gridLines.Parent = loaderFrame
+
+for col = 0, 14 do
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(0, 1, 1, 0)
+    line.Position = UDim2.new(col / 14, 0, 0, 0)
+    line.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    line.BackgroundTransparency = 0.85
+    line.BorderSizePixel = 0
+    line.ZIndex = 2
+    line.Parent = gridLines
+end
+for row = 0, 10 do
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, row / 10, 0)
+    line.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    line.BackgroundTransparency = 0.85
+    line.BorderSizePixel = 0
+    line.ZIndex = 2
+    line.Parent = gridLines
+end
+
+local bgGlow = Instance.new("Frame")
+bgGlow.Size = UDim2.new(0, 500, 0, 500)
+bgGlow.Position = UDim2.new(0.5, -250, 0.5, -250)
+bgGlow.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+bgGlow.BackgroundTransparency = 0.96
+bgGlow.BorderSizePixel = 0
+bgGlow.ZIndex = 2
+bgGlow.Parent = loaderFrame
+Instance.new("UICorner", bgGlow).CornerRadius = UDim.new(1, 0)
+
+local loaderCenter = Instance.new("Frame")
+loaderCenter.Size = UDim2.new(0, 320, 0, 250)
+loaderCenter.Position = UDim2.new(0.5, -160, 0.5, -125)
+loaderCenter.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+loaderCenter.BorderSizePixel = 0
+loaderCenter.ZIndex = 3
+loaderCenter.Parent = loaderFrame
+Instance.new("UICorner", loaderCenter).CornerRadius = UDim.new(0, 20)
+local loaderStroke = Instance.new("UIStroke", loaderCenter)
+loaderStroke.Color = Color3.fromRGB(180, 180, 180)
+loaderStroke.Thickness = 1.5
+loaderStroke.Transparency = 0.3
+
+local cardGlow = Instance.new("Frame")
+cardGlow.Size = UDim2.new(0, 360, 0, 290)
+cardGlow.Position = UDim2.new(0.5, -180, 0.5, -145)
+cardGlow.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+cardGlow.BackgroundTransparency = 0.92
+cardGlow.BorderSizePixel = 0
+cardGlow.ZIndex = 2
+cardGlow.Parent = loaderFrame
+Instance.new("UICorner", cardGlow).CornerRadius = UDim.new(0, 28)
+
+local loaderIconBG = Instance.new("Frame")
+loaderIconBG.Size = UDim2.new(0, 76, 0, 76)
+loaderIconBG.Position = UDim2.new(0.5, -38, 0, 24)
+loaderIconBG.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+loaderIconBG.BackgroundTransparency = 0.1
+loaderIconBG.BorderSizePixel = 0
+loaderIconBG.ZIndex = 4
+loaderIconBG.Parent = loaderCenter
+Instance.new("UICorner", loaderIconBG).CornerRadius = UDim.new(0, 18)
+local loaderIconStroke = Instance.new("UIStroke", loaderIconBG)
+loaderIconStroke.Color = Color3.fromRGB(255, 255, 255)
+loaderIconStroke.Thickness = 2
+local iconGrad = Instance.new("UIGradient", loaderIconBG)
+iconGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 80, 80)),
+})
+iconGrad.Rotation = 135
+
+local loaderIconLabel = Instance.new("TextLabel")
+loaderIconLabel.Size = UDim2.new(1, 0, 1, 0)
+loaderIconLabel.BackgroundTransparency = 1
+loaderIconLabel.Text = "MM2"
+loaderIconLabel.TextColor3 = Color3.fromRGB(10, 10, 10)
+loaderIconLabel.Font = Enum.Font.GothamBold
+loaderIconLabel.TextSize = 22
+loaderIconLabel.ZIndex = 5
+loaderIconLabel.Parent = loaderIconBG
+
+local loaderTitle = Instance.new("TextLabel")
+loaderTitle.Size = UDim2.new(1, -20, 0, 28)
+loaderTitle.Position = UDim2.new(0, 10, 0, 114)
+loaderTitle.BackgroundTransparency = 1
+loaderTitle.Text = "ITEM SPAWNER"
+loaderTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+loaderTitle.Font = Enum.Font.GothamBold
+loaderTitle.TextSize = 22
+loaderTitle.ZIndex = 4
+loaderTitle.Parent = loaderCenter
+
+local loaderSub = Instance.new("TextLabel")
+loaderSub.Size = UDim2.new(1, -20, 0, 18)
+loaderSub.Position = UDim2.new(0, 10, 0, 145)
+loaderSub.BackgroundTransparency = 1
+loaderSub.Text = "Murder Mystery 2"
+loaderSub.TextColor3 = COLORS.TextSub
+loaderSub.Font = Enum.Font.Gotham
+loaderSub.TextSize = 12
+loaderSub.ZIndex = 4
+loaderSub.Parent = loaderCenter
+
+local loaderTrackBG = Instance.new("Frame")
+loaderTrackBG.Size = UDim2.new(1, -40, 0, 7)
+loaderTrackBG.Position = UDim2.new(0, 20, 0, 182)
+loaderTrackBG.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+loaderTrackBG.BorderSizePixel = 0
+loaderTrackBG.ZIndex = 4
+loaderTrackBG.Parent = loaderCenter
+Instance.new("UICorner", loaderTrackBG).CornerRadius = UDim.new(1, 0)
+
+local loaderFill = Instance.new("Frame")
+loaderFill.Size = UDim2.new(0, 0, 1, 0)
+loaderFill.BackgroundColor3 = Color3.fromRGB(220, 220, 220)
+loaderFill.BorderSizePixel = 0
+loaderFill.ZIndex = 5
+loaderFill.Parent = loaderTrackBG
+Instance.new("UICorner", loaderFill).CornerRadius = UDim.new(1, 0)
+local fillGrad = Instance.new("UIGradient", loaderFill)
+fillGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(160, 160, 160)),
+})
+
+local glider = Instance.new("Frame")
+glider.Size = UDim2.new(0, 13, 0, 13)
+glider.AnchorPoint = Vector2.new(0.5, 0.5)
+glider.Position = UDim2.new(1, 0, 0.5, 0)
+glider.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+glider.BorderSizePixel = 0
+glider.ZIndex = 6
+glider.Parent = loaderFill
+Instance.new("UICorner", glider).CornerRadius = UDim.new(1, 0)
+
+local loaderStatus = Instance.new("TextLabel")
+loaderStatus.Size = UDim2.new(1, -80, 0, 16)
+loaderStatus.Position = UDim2.new(0, 20, 0, 202)
+loaderStatus.BackgroundTransparency = 1
+loaderStatus.Text = "Initializing..."
+loaderStatus.TextColor3 = COLORS.TextDim
+loaderStatus.Font = Enum.Font.Gotham
+loaderStatus.TextSize = 11
+loaderStatus.TextXAlignment = Enum.TextXAlignment.Left
+loaderStatus.ZIndex = 4
+loaderStatus.Parent = loaderCenter
+
+local loaderPct = Instance.new("TextLabel")
+loaderPct.Size = UDim2.new(0, 55, 0, 16)
+loaderPct.Position = UDim2.new(1, -65, 0, 202)
+loaderPct.BackgroundTransparency = 1
+loaderPct.Text = "0%"
+loaderPct.TextColor3 = Color3.fromRGB(220, 220, 220)
+loaderPct.Font = Enum.Font.GothamBold
+loaderPct.TextSize = 11
+loaderPct.TextXAlignment = Enum.TextXAlignment.Right
+loaderPct.ZIndex = 4
+loaderPct.Parent = loaderCenter
+
+task.spawn(function()
+    while loaderGui.Parent and loaderFrame.Visible do
+        tween(loaderIconBG, 0.9, {BackgroundTransparency = 0}, Enum.EasingStyle.Sine):Play()
+        task.wait(0.9)
+        tween(loaderIconBG, 0.9, {BackgroundTransparency = 0.25}, Enum.EasingStyle.Sine):Play()
+        task.wait(0.9)
+    end
+end)
+task.spawn(function()
+    while loaderGui.Parent and loaderFrame.Visible do
+        iconGrad.Rotation = (iconGrad.Rotation + 1.5) % 360
+        task.wait(0.03)
+    end
+end)
+task.spawn(function()
+    local t = 0
+    while loaderGui.Parent and loaderFrame.Visible do
+        t += 0.04
+        bgGlow.BackgroundTransparency = 0.96 + math.sin(t) * 0.02
+        cardGlow.BackgroundTransparency = 0.92 + math.sin(t * 1.3) * 0.03
+        task.wait(0.05)
+    end
+end)
+
+-- ═══════════════════════════════════════
+--   ScreenGui для основного GUI
+-- ═══════════════════════════════════════
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "MM2Spawner"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder = 100
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+outerGlow = Instance.new("Frame")
+outerGlow.Size = UDim2.new(0, 404, 0, 534)
+outerGlow.Position = UDim2.new(0.5, -202, 0.5, -267)
+outerGlow.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+outerGlow.BackgroundTransparency = 0.92
+outerGlow.BorderSizePixel = 0
+outerGlow.ZIndex = 1
+outerGlow.Visible = false
+outerGlow.Parent = screenGui
+Instance.new("UICorner", outerGlow).CornerRadius = UDim.new(0, 28)
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 360, 0, 490)
+mainFrame.Position = UDim2.new(0.5, -180, 0.5, -245)
+mainFrame.BackgroundColor3 = COLORS.BG
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Visible = false
+mainFrame.ZIndex = 2
+mainFrame.Parent = screenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 18)
+
+local mainBorder = Instance.new("UIStroke", mainFrame)
+mainBorder.Color = Color3.fromRGB(180, 180, 180)
+mainBorder.Thickness = 1.5
+mainBorder.Transparency = 0.3
+
+local function makeOrb(parent, x, y, size, color, transp)
+    local orb = Instance.new("Frame")
+    orb.Size = UDim2.new(0, size, 0, size)
+    orb.Position = UDim2.new(0, x, 0, y)
+    orb.BackgroundColor3 = color
+    orb.BackgroundTransparency = transp
+    orb.BorderSizePixel = 0
+    orb.ZIndex = 2
+    orb.Parent = parent
+    Instance.new("UICorner", orb).CornerRadius = UDim.new(1, 0)
+    return orb
+end
+local orb1 = makeOrb(mainFrame, -70, -70, 200, Color3.fromRGB(180, 180, 180), 0.94)
+local orb2 = makeOrb(mainFrame, 210, 310, 150, Color3.fromRGB(140, 140, 140), 0.95)
+local orb3 = makeOrb(mainFrame, 290, -50, 110, Color3.fromRGB(220, 220, 220), 0.96)
+
+-- ── ШАПКА ──────────────────────────────
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 70)
+header.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+header.BorderSizePixel = 0
+header.ZIndex = 5
+header.Parent = mainFrame
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 18)
+Instance.new("UIGradient", header).Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 24)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 10, 10)),
+})
+
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0, 18)
+headerFix.Position = UDim2.new(0, 0, 1, -18)
+headerFix.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+headerFix.BorderSizePixel = 0
+headerFix.ZIndex = 5
+headerFix.Parent = header
+
+local neonLine = Instance.new("Frame")
+neonLine.Size = UDim2.new(0, 50, 0, 2)
+neonLine.Position = UDim2.new(0, 18, 0, 0)
+neonLine.BackgroundColor3 = Color3.fromRGB(220, 220, 220)
+neonLine.BorderSizePixel = 0
+neonLine.ZIndex = 6
+neonLine.Parent = header
+Instance.new("UICorner", neonLine).CornerRadius = UDim.new(0, 2)
+local neonLineGrad = Instance.new("UIGradient", neonLine)
+neonLineGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(140, 140, 140)),
+})
+
+local neonLine2 = Instance.new("Frame")
+neonLine2.Size = UDim2.new(0, 18, 0, 2)
+neonLine2.Position = UDim2.new(0, 76, 0, 0)
+neonLine2.BackgroundColor3 = Color3.fromRGB(160, 160, 160)
+neonLine2.BackgroundTransparency = 0.4
+neonLine2.BorderSizePixel = 0
+neonLine2.ZIndex = 6
+neonLine2.Parent = header
+Instance.new("UICorner", neonLine2).CornerRadius = UDim.new(0, 2)
+
+local iconBox = Instance.new("Frame")
+iconBox.Size = UDim2.new(0, 42, 0, 42)
+iconBox.Position = UDim2.new(0, 14, 0.5, -21)
+iconBox.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+iconBox.BorderSizePixel = 0
+iconBox.ZIndex = 6
+iconBox.Parent = header
+Instance.new("UICorner", iconBox).CornerRadius = UDim.new(0, 10)
+local iconGradient = Instance.new("UIGradient", iconBox)
+iconGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 80, 80)),
+})
+iconGradient.Rotation = 135
+local iconStroke2 = Instance.new("UIStroke", iconBox)
+iconStroke2.Color = Color3.fromRGB(255, 255, 255)
+iconStroke2.Thickness = 1.5
+iconStroke2.Transparency = 0.4
+
+local iconLabel = Instance.new("TextLabel")
+iconLabel.Size = UDim2.new(1, 0, 1, 0)
+iconLabel.BackgroundTransparency = 1
+iconLabel.Text = "MM2"
+iconLabel.TextColor3 = Color3.fromRGB(10, 10, 10)
+iconLabel.Font = Enum.Font.GothamBold
+iconLabel.TextSize = 12
+iconLabel.ZIndex = 7
+iconLabel.Parent = iconBox
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(0, 220, 0, 24)
+title.Position = UDim2.new(0, 66, 0, 12)
+title.BackgroundTransparency = 1
+title.Text = "ITEM SPAWNER"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 17
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.ZIndex = 6
+title.Parent = header
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(0, 220, 0, 16)
+subtitle.Position = UDim2.new(0, 66, 0, 38)
+subtitle.BackgroundTransparency = 1
+subtitle.Text = "Murder Mystery 2"
+subtitle.TextColor3 = COLORS.TextSub
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 11
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.ZIndex = 6
+subtitle.Parent = header
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 30, 0, 30)
+closeBtn.Position = UDim2.new(1, -44, 0.5, -15)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+closeBtn.BackgroundTransparency = 0.2
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 13
+closeBtn.BorderSizePixel = 0
+closeBtn.AutoButtonColor = false
+closeBtn.ZIndex = 7
+closeBtn.Parent = header
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+local closeBtnStroke = Instance.new("UIStroke", closeBtn)
+closeBtnStroke.Color = COLORS.Error
+closeBtnStroke.Thickness = 1
+closeBtnStroke.Transparency = 0.5
+
+closeBtn.MouseEnter:Connect(function()
+    tween(closeBtn, 0.15, {BackgroundTransparency = 0, Size = UDim2.new(0, 32, 0, 32), Position = UDim2.new(1, -45, 0.5, -16)}):Play()
+    tween(closeBtnStroke, 0.15, {Transparency = 0}):Play()
+end)
+closeBtn.MouseLeave:Connect(function()
+    tween(closeBtn, 0.15, {BackgroundTransparency = 0.2, Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(1, -44, 0.5, -15)}):Play()
+    tween(closeBtnStroke, 0.15, {Transparency = 0.5}):Play()
+end)
+addRipple(closeBtn)
+makeDraggable(header, mainFrame)
+
+-- ── ПОИСК ──────────────────────────────
+local searchOuter = Instance.new("Frame")
+searchOuter.Size = UDim2.new(1, -28, 0, 42)
+searchOuter.Position = UDim2.new(0, 14, 0, 82)
+searchOuter.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+searchOuter.BackgroundTransparency = 0.85
+searchOuter.BorderSizePixel = 0
+searchOuter.ZIndex = 4
+searchOuter.Parent = mainFrame
+Instance.new("UICorner", searchOuter).CornerRadius = UDim.new(0, 12)
+
+local searchInner = Instance.new("Frame")
+searchInner.Size = UDim2.new(1, -2, 1, -2)
+searchInner.Position = UDim2.new(0, 1, 0, 1)
+searchInner.BackgroundColor3 = COLORS.Card
+searchInner.BorderSizePixel = 0
+searchInner.ZIndex = 4
+searchInner.Parent = searchOuter
+Instance.new("UICorner", searchInner).CornerRadius = UDim.new(0, 11)
+
+local searchIconLbl = Instance.new("TextLabel")
+searchIconLbl.Size = UDim2.new(0, 32, 1, 0)
+searchIconLbl.Position = UDim2.new(0, 0, 0, 0)
+searchIconLbl.BackgroundTransparency = 1
+searchIconLbl.Text = "Q"
+searchIconLbl.TextColor3 = COLORS.TextDim
+searchIconLbl.Font = Enum.Font.GothamBold
+searchIconLbl.TextSize = 14
+searchIconLbl.ZIndex = 5
+searchIconLbl.Parent = searchInner
+
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -38, 1, 0)
+searchBox.Position = UDim2.new(0, 30, 0, 0)
+searchBox.BackgroundTransparency = 1
+searchBox.Text = ""
+searchBox.PlaceholderText = "Search weapons..."
+searchBox.PlaceholderColor3 = COLORS.TextDim
+searchBox.TextColor3 = COLORS.Text
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 13
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+searchBox.ClearTextOnFocus = false
+searchBox.ZIndex = 5
+searchBox.Parent = searchInner
+
+searchBox.Focused:Connect(function()
+    tween(searchOuter, 0.2, {BackgroundTransparency = 0.6}):Play()
+    tween(searchIconLbl, 0.2, {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+end)
+searchBox.FocusLost:Connect(function()
+    tween(searchOuter, 0.2, {BackgroundTransparency = 0.85}):Play()
+    tween(searchIconLbl, 0.2, {TextColor3 = COLORS.TextDim}):Play()
+end)
+
+-- ── СЧЁТЧИК ────────────────────────────
+local countLabel = Instance.new("TextLabel")
+countLabel.Size = UDim2.new(1, -28, 0, 16)
+countLabel.Position = UDim2.new(0, 14, 0, 130)
+countLabel.BackgroundTransparency = 1
+countLabel.Text = "All items"
+countLabel.TextColor3 = COLORS.TextDim
+countLabel.Font = Enum.Font.Gotham
+countLabel.TextSize = 11
+countLabel.TextXAlignment = Enum.TextXAlignment.Left
+countLabel.ZIndex = 4
+countLabel.Parent = mainFrame
+
+-- ── СПИСОК ─────────────────────────────
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size = UDim2.new(1, -28, 0, 248)
+scrollFrame.Position = UDim2.new(0, 14, 0, 150)
+scrollFrame.BackgroundColor3 = COLORS.Panel
+scrollFrame.BorderSizePixel = 0
+scrollFrame.ScrollBarThickness = 4
+scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(180, 180, 180)
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+scrollFrame.ClipsDescendants = true
+scrollFrame.ZIndex = 4
+scrollFrame.Parent = mainFrame
+Instance.new("UICorner", scrollFrame).CornerRadius = UDim.new(0, 12)
+local scrollStroke = Instance.new("UIStroke", scrollFrame)
+scrollStroke.Color = COLORS.Border
+scrollStroke.Thickness = 1
+scrollStroke.Transparency = 0.4
+
+local listLayout = Instance.new("UIListLayout", scrollFrame)
+listLayout.Padding = UDim.new(0, 4)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local listPad = Instance.new("UIPadding", scrollFrame)
+listPad.PaddingTop    = UDim.new(0, 6)
+listPad.PaddingBottom = UDim.new(0, 6)
+listPad.PaddingLeft   = UDim.new(0, 6)
+listPad.PaddingRight  = UDim.new(0, 10)
+
+-- ── КНОПКА SPAWN ───────────────────────
+local spawnBtn = Instance.new("TextButton")
+spawnBtn.Size = UDim2.new(1, -28, 0, 48)
+spawnBtn.Position = UDim2.new(0, 14, 0, 412)
+spawnBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+spawnBtn.Text = ""
+spawnBtn.AutoButtonColor = false
+spawnBtn.BorderSizePixel = 0
+spawnBtn.ClipsDescendants = true
+spawnBtn.ZIndex = 5
+spawnBtn.Parent = mainFrame
+Instance.new("UICorner", spawnBtn).CornerRadius = UDim.new(0, 13)
+local spawnGrad = Instance.new("UIGradient", spawnBtn)
+spawnGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 110, 110)),
+})
+spawnGrad.Rotation = 135
+local spawnBtnStroke = Instance.new("UIStroke", spawnBtn)
+spawnBtnStroke.Color = Color3.fromRGB(255, 255, 255)
+spawnBtnStroke.Thickness = 1.5
+spawnBtnStroke.Transparency = 0.4
+
+local shimmer = Instance.new("Frame")
+shimmer.Size = UDim2.new(0.35, 0, 2, 0)
+shimmer.Position = UDim2.new(-0.5, 0, -0.5, 0)
+shimmer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+shimmer.BackgroundTransparency = 0.82
+shimmer.Rotation = 20
+shimmer.BorderSizePixel = 0
+shimmer.ZIndex = 6
+shimmer.Parent = spawnBtn
+
+local spawnIconLbl = Instance.new("TextLabel")
+spawnIconLbl.Size = UDim2.new(0, 26, 1, 0)
+spawnIconLbl.Position = UDim2.new(0.5, -65, 0, 0)
+spawnIconLbl.BackgroundTransparency = 1
+spawnIconLbl.Text = "+"
+spawnIconLbl.TextColor3 = Color3.fromRGB(10, 10, 10)
+spawnIconLbl.Font = Enum.Font.GothamBold
+spawnIconLbl.TextSize = 22
+spawnIconLbl.ZIndex = 7
+spawnIconLbl.Parent = spawnBtn
+
+local spawnTextLbl = Instance.new("TextLabel")
+spawnTextLbl.Size = UDim2.new(0, 120, 1, 0)
+spawnTextLbl.Position = UDim2.new(0.5, -30, 0, 0)
+spawnTextLbl.BackgroundTransparency = 1
+spawnTextLbl.Text = "SPAWN ITEM"
+spawnTextLbl.TextColor3 = Color3.fromRGB(10, 10, 10)
+spawnTextLbl.Font = Enum.Font.GothamBold
+spawnTextLbl.TextSize = 14
+spawnTextLbl.TextXAlignment = Enum.TextXAlignment.Left
+spawnTextLbl.ZIndex = 7
+spawnTextLbl.Parent = spawnBtn
+
+addRipple(spawnBtn)
+
+task.spawn(function()
+    while screenGui.Parent do
+        tween(shimmer, 0, {Position = UDim2.new(-0.5, 0, -0.5, 0)}):Play()
+        task.wait(2.8)
+        tween(shimmer, 0.6, {Position = UDim2.new(1.3, 0, -0.5, 0)}, Enum.EasingStyle.Quad):Play()
+        task.wait(0.7)
+    end
+end)
+
+spawnBtn.MouseEnter:Connect(function()
+    tween(spawnBtn, 0.2, {Size = UDim2.new(1, -24, 0, 50), Position = UDim2.new(0, 12, 0, 411)}):Play()
+    tween(spawnGrad, 0.2, {Rotation = 115}):Play()
+    tween(spawnBtnStroke, 0.2, {Transparency = 0}):Play()
+end)
+spawnBtn.MouseLeave:Connect(function()
+    tween(spawnBtn, 0.2, {Size = UDim2.new(1, -28, 0, 48), Position = UDim2.new(0, 14, 0, 412)}):Play()
+    tween(spawnGrad, 0.2, {Rotation = 135}):Play()
+    tween(spawnBtnStroke, 0.2, {Transparency = 0.4}):Play()
+end)
+
+-- ── ПРОГРЕСС-БАР СПАВНА ────────────────
+local ownedAddBtn = Instance.new("TextButton")
+ownedAddBtn.Size = UDim2.new(0, 114, 0, 24)
+ownedAddBtn.Position = UDim2.new(1, -132, 0, 424)
+ownedAddBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+ownedAddBtn.Text = "ADD OWNED"
+ownedAddBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ownedAddBtn.Font = Enum.Font.GothamBold
+ownedAddBtn.TextSize = 10
+ownedAddBtn.BorderSizePixel = 0
+ownedAddBtn.AutoButtonColor = false
+ownedAddBtn.ZIndex = 6
+ownedAddBtn.Parent = mainFrame
+Instance.new("UICorner", ownedAddBtn).CornerRadius = UDim.new(0, 8)
+local ownedAddStroke = Instance.new("UIStroke", ownedAddBtn)
+ownedAddStroke.Color = Color3.fromRGB(200, 200, 200)
+ownedAddStroke.Thickness = 1
+ownedAddStroke.Transparency = 0.45
+
+ownedAddBtn.MouseEnter:Connect(function()
+    tween(ownedAddBtn, 0.15, {BackgroundColor3 = Color3.fromRGB(36, 36, 36), Size = UDim2.new(0, 118, 0, 26), Position = UDim2.new(1, -134, 0, 423)}):Play()
+    tween(ownedAddStroke, 0.15, {Transparency = 0.15}):Play()
+end)
+ownedAddBtn.MouseLeave:Connect(function()
+    tween(ownedAddBtn, 0.15, {BackgroundColor3 = Color3.fromRGB(24, 24, 24), Size = UDim2.new(0, 114, 0, 24), Position = UDim2.new(1, -132, 0, 424)}):Play()
+    tween(ownedAddStroke, 0.15, {Transparency = 0.45}):Play()
+end)
+ownedAddBtn.MouseButton1Click:Connect(function()
+    if not selectedItem then
+        showToast("Select an item first!", true)
+        return
+    end
+    local itemName = selectedItem.custom
+    local originalName = selectedItem.original
+    if getOwnedCount(originalName) <= 0 then
+        showToast("You do not own this item.", true)
+        return
+    end
+    local ok = OfferOwnedItemLocal(itemName, "Weapons")
+    if ok then
+        showToast(itemName .. " offered locally!")
+    else
+        showToast("Local trade slots are full.", true)
+    end
+end)
+local progressBG = Instance.new("Frame")
+progressBG.Size = UDim2.new(1, -28, 0, 48)
+progressBG.Position = UDim2.new(0, 14, 0, 412)
+progressBG.BackgroundColor3 = COLORS.Card
+progressBG.BorderSizePixel = 0
+progressBG.Visible = false
+progressBG.ZIndex = 5
+progressBG.Parent = mainFrame
+Instance.new("UICorner", progressBG).CornerRadius = UDim.new(0, 13)
+local progStroke = Instance.new("UIStroke", progressBG)
+progStroke.Color = COLORS.Border
+progStroke.Thickness = 1
+progStroke.Transparency = 0.3
+
+local progressLabel = Instance.new("TextLabel")
+progressLabel.Size = UDim2.new(1, -16, 0, 20)
+progressLabel.Position = UDim2.new(0, 10, 0, 5)
+progressLabel.BackgroundTransparency = 1
+progressLabel.Text = "Spawning..."
+progressLabel.TextColor3 = COLORS.Text
+progressLabel.Font = Enum.Font.Gotham
+progressLabel.TextSize = 12
+progressLabel.TextXAlignment = Enum.TextXAlignment.Left
+progressLabel.ZIndex = 6
+progressLabel.Parent = progressBG
+
+local progressTrack = Instance.new("Frame")
+progressTrack.Size = UDim2.new(1, -20, 0, 7)
+progressTrack.Position = UDim2.new(0, 10, 0, 30)
+progressTrack.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+progressTrack.BorderSizePixel = 0
+progressTrack.ZIndex = 6
+progressTrack.Parent = progressBG
+Instance.new("UICorner", progressTrack).CornerRadius = UDim.new(1, 0)
+
+local progressFill = Instance.new("Frame")
+progressFill.Size = UDim2.new(0, 0, 1, 0)
+progressFill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+progressFill.BorderSizePixel = 0
+progressFill.ZIndex = 7
+progressFill.Parent = progressTrack
+Instance.new("UICorner", progressFill).CornerRadius = UDim.new(1, 0)
+local progFillGrad = Instance.new("UIGradient", progressFill)
+progFillGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(140, 140, 140)),
+})
+
+-- ── ТОСТ-УВЕДОМЛЕНИЕ ───────────────────
+local toast = Instance.new("Frame")
+toast.Size = UDim2.new(0, 260, 0, 44)
+toast.Position = UDim2.new(0.5, -130, 1, 10)
+toast.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+toast.BorderSizePixel = 0
+toast.ZIndex = 50
+toast.Parent = screenGui
+Instance.new("UICorner", toast).CornerRadius = UDim.new(0, 12)
+local toastStroke = Instance.new("UIStroke", toast)
+toastStroke.Color = Color3.fromRGB(200, 200, 200)
+toastStroke.Thickness = 1.5
+toastStroke.Transparency = 0.2
+
+local toastDot = Instance.new("Frame")
+toastDot.Size = UDim2.new(0, 8, 0, 8)
+toastDot.Position = UDim2.new(0, 14, 0.5, -4)
+toastDot.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+toastDot.BorderSizePixel = 0
+toastDot.ZIndex = 51
+toastDot.Parent = toast
+Instance.new("UICorner", toastDot).CornerRadius = UDim.new(1, 0)
+
+local toastText = Instance.new("TextLabel")
+toastText.Size = UDim2.new(1, -32, 1, 0)
+toastText.Position = UDim2.new(0, 30, 0, 0)
+toastText.BackgroundTransparency = 1
+toastText.Text = "Item added!"
+toastText.TextColor3 = COLORS.Text
+toastText.Font = Enum.Font.GothamBold
+toastText.TextSize = 13
+toastText.TextXAlignment = Enum.TextXAlignment.Left
+toastText.ZIndex = 51
+toastText.Parent = toast
+
+local function showToast(msg, isError)
+    toastText.Text = msg
+    local col = isError and COLORS.Error or Color3.fromRGB(200, 200, 200)
+    toastStroke.Color = col
+    toastDot.BackgroundColor3 = col
+    tween(toast, 0.4, {Position = UDim2.new(0.5, -130, 1, -58)}, Enum.EasingStyle.Back):Play()
+    task.delay(2.2, function()
+        tween(toast, 0.3, {Position = UDim2.new(0.5, -130, 1, 10)}):Play()
+    end)
+end
+
+local function trimText(text)
+    return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function showLocalTradePanels()
+    if previewFrame then
+        previewFrame.Visible = true
+        rebuildLocalTradePreview()
+    end
+    if openRealTradeGUI then
+        pcall(openRealTradeGUI)
+    else
+        local gui = getTradeGui()
+        if gui and gui:IsA("ScreenGui") then
+            gui.Enabled = true
+            local container = gui:FindFirstChild("Container")
+            if container then
+                local items = container:FindFirstChild("Items")
+                local trade = container:FindFirstChild("Trade")
+                local blocker = gui:FindFirstChild("ClickBlocker")
+                if items then items.Visible = false end
+                if trade then trade.Visible = true end
+                if blocker then blocker.Visible = false end
+            end
+        end
+    end
+    refreshLocalTradeGui()
+end
+
+local function updateTradeHubUI()
+    if tradeHubTargetLabel then
+        if tradeHubSession.Active then
+            tradeHubTargetLabel.Text = "Target: @" .. tradeHubSession.TargetName
+        else
+            tradeHubTargetLabel.Text = "Target: none"
+        end
+    end
+
+    if tradeHubStatusLabel then
+        if tradeHubSession.Active then
+            tradeHubStatusLabel.Text = tradeHubSession.Accepted and "Status: accepted locally" or "Status: request sent"
+        else
+            tradeHubStatusLabel.Text = "Status: idle"
+        end
+    end
+
+    if tradeHubTimerLabel then
+        if tradeHubSession.Countdown > 0 then
+            tradeHubTimerLabel.Text = "Timer: " .. tradeHubSession.Countdown .. "s"
+        elseif tradeHubSession.Active then
+            tradeHubTimerLabel.Text = tradeHubSession.Accepted and "Timer: done" or "Timer: ready"
+        else
+            tradeHubTimerLabel.Text = "Timer: idle"
+        end
+    end
+
+    if tradeHubAcceptBtn then
+        if tradeHubSession.Accepted then
+            tradeHubAcceptBtn.Text = "ACCEPTED"
+            tradeHubAcceptBtn.Active = false
+            tradeHubAcceptBtn.AutoButtonColor = false
+        elseif tradeHubSession.Active then
+            tradeHubAcceptBtn.Text = tradeHubSession.Countdown > 0 and ("ACCEPT (" .. tradeHubSession.Countdown .. ")") or "ACCEPT"
+            tradeHubAcceptBtn.Active = true
+        else
+            tradeHubAcceptBtn.Text = "ACCEPT"
+            tradeHubAcceptBtn.Active = false
+        end
+    end
+end
+
+local function resetTradeHubSession()
+    tradeHubCountdownToken += 1
+    tradeHubSession.Active = false
+    tradeHubSession.TargetName = ""
+    tradeHubSession.Accepted = false
+    tradeHubSession.Countdown = 0
+    updateTradeHubUI()
+end
+
+local function startLocalTradeSession()
+    local target = trimText(tradeHubTargetBox and tradeHubTargetBox.Text or "")
+    if target == "" then
+        showToast("Enter a player name first!", true)
+        return false
+    end
+    tradeHubCountdownToken += 1
+    tradeHubSession.Active = true
+    tradeHubSession.TargetName = target
+    tradeHubSession.Accepted = false
+    tradeHubSession.Countdown = 0
+    updateTradeHubUI()
+    if mockState then
+        mockState.currentTradeRequest = {
+            partner = target,
+            timestamp = tick(),
+        }
+    end
+    showToast("Local request prepared for " .. target)
+    return true
+end
+
+local function acceptLocalTrade()
+    if not tradeHubSession.Active then
+        showToast("Start a local request first!", true)
+        return
+    end
+    if tradeHubSession.Accepted then
+        return
+    end
+
+    tradeHubCountdownToken += 1
+    local token = tradeHubCountdownToken
+
+    task.spawn(function()
+        for i = 5, 1, -1 do
+            if token ~= tradeHubCountdownToken then
+                return
+            end
+            tradeHubSession.Countdown = i
+            updateTradeHubUI()
+            task.wait(1)
+        end
+
+        if token ~= tradeHubCountdownToken then
+            return
+        end
+
+        tradeHubSession.Countdown = 0
+        tradeHubSession.Accepted = true
+        updateTradeHubUI()
+        showLocalTradePanels()
+        if tradeHubFrame then
+            tradeHubFrame.Visible = false
+        end
+        showToast("Local trade accepted for " .. tradeHubSession.TargetName)
+    end)
+end
+
+-- ═══════════════════════════════════════
+--           СПИСОК ПРЕДМЕТОВ
+-- ═══════════════════════════════════════
+local function getTradeRemote()
+    local ok, rep = pcall(game.GetService, game, "ReplicatedStorage")
+    if not ok or not rep then
+        return nil
+    end
+    return rep:FindFirstChild("Trade")
+end
+
+local function waitForTradeModule()
+    return nil
+end
+
+local function waitForTradeGUI()
+    local pg = player and player:FindFirstChild("PlayerGui") or nil
+    if not pg then
+        pg = player:WaitForChild("PlayerGui")
+    end
+    for _ = 1, 50 do
+        local gui = pg:FindFirstChild("TradeGUI")
+        if gui then
+            return gui
+        end
+        task.wait(0.1)
+    end
+    return nil
+end
+
+initTradeSystem = function()
+    if not TradeModule then
+        pcall(function()
+            TradeModule = waitForTradeModule()
+        end)
+    end
+    if not TradeGUI then
+        pcall(function()
+            TradeGUI = waitForTradeGUI()
+        end)
+    end
+    if not TradeRemote then
+        pcall(function()
+            TradeRemote = getTradeRemote()
+        end)
+    end
+    return TradeModule ~= nil or TradeGUI ~= nil or TradeRemote ~= nil
+end
+
+openRealTradeGUI = function()
+    initTradeSystem()
+    hookTradeEvents()
+
+    if not TradeGUI or not TradeGUI:FindFirstChild("Container") then
+        return false
+    end
+
+    local container = TradeGUI.Container
+    TradeGUI.Enabled = true
+
+    local items = container:FindFirstChild("Items")
+    local trade = container:FindFirstChild("Trade")
+    local blocker = TradeGUI:FindFirstChild("ClickBlocker")
+    if items then items.Visible = false end
+    if trade then trade.Visible = true end
+    if blocker then blocker.Visible = false end
+
+    if TradeModule then
+        pcall(function()
+            if TradeModule.UpdateTradeInventory then
+                TradeModule.UpdateTradeInventory()
+            end
+            if TradeModule.ConnectTabButtons then
+                TradeModule.ConnectTabButtons()
+            end
+            if TradeModule.ConnectOfferButtons then
+                TradeModule.ConnectOfferButtons()
+            end
+        end)
+    end
+
+    return true
+end
+
+simulateTradeRequest = function(senderName)
+    senderName = trimText(senderName)
+    if senderName == "" then
+        showToast("Enter a player name first!", true)
+        return false
+    end
+
+    mockState.currentTradeRequest = {
+        partner = senderName,
+        timestamp = tick(),
+    }
+    tradeHubSession.Active = true
+    tradeHubSession.TargetName = senderName
+    tradeHubSession.Accepted = false
+    tradeHubSession.Countdown = 0
+    updateTradeHubUI()
+
+    showToast("Trade request prepared for " .. senderName)
+    return true
+end
+
+autoAcceptTradeRequest = function()
+    if not mockState.currentTradeRequest then
+        showToast("No active Trade Request", true)
+        return false
+    end
+
+    initTradeSystem()
+    hookTradeEvents()
+
+    task.wait(CONFIG.AUTO_ACCEPT_DELAY)
+
+    if TradeRemote and TradeRemote:FindFirstChild("AcceptRequest") then
+        pcall(function()
+            TradeRemote.AcceptRequest:FireServer()
+        end)
+    end
+
+    mockState.tradeActive = true
+    mockState.tradePartner = mockState.currentTradeRequest.partner
+    mockState.currentTradeRequest = nil
+    tradeHubSession.Accepted = true
+    tradeHubSession.Countdown = 0
+    updateTradeHubUI()
+    openRealTradeGUI()
+
+    return true
+end
+
+autoConfirmTrade = function()
+    if not mockState.tradeActive then
+        return false
+    end
+
+    initTradeSystem()
+
+    task.wait(CONFIG.AUTO_CONFIRM_DELAY)
+
+    if TradeRemote and TradeRemote:FindFirstChild("AcceptTrade") then
+        pcall(function()
+            TradeRemote.AcceptTrade:FireServer(game.PlaceId * 3, mockState.lastOffer)
+        end)
+    end
+
+    mockState.tradeActive = false
+    mockState.tradePartner = nil
+    mockState.lastOffer = nil
+    tradeHubSession.Active = false
+    tradeHubSession.TargetName = ""
+    tradeHubSession.Accepted = false
+    tradeHubSession.Countdown = 0
+    updateTradeHubUI()
+
+    return true
+end
+
+hookTradeEvents = function()
+    if tradeEventsHooked then
+        return
+    end
+    initTradeSystem()
+    if not TradeRemote then
+        return
+    end
+    tradeEventsHooked = true
+
+    local startTrade = TradeRemote:FindFirstChild("StartTrade")
+    if startTrade and startTrade.OnClientEvent then
+        startTrade.OnClientEvent:Connect(function(tradeState, partnerName)
+            mockState.tradeActive = true
+            mockState.tradePartner = partnerName
+            mockState.currentTradeRequest = nil
+            mockState.lastOffer = tradeState and tradeState.LastOffer or nil
+            tradeHubSession.Active = true
+            tradeHubSession.TargetName = partnerName or tradeHubSession.TargetName
+            tradeHubSession.Accepted = true
+            tradeHubSession.Countdown = 0
+            updateTradeHubUI()
+            openRealTradeGUI()
+        end)
+    end
+
+    local updateTrade = TradeRemote:FindFirstChild("UpdateTrade")
+    if updateTrade and updateTrade.OnClientEvent then
+        updateTrade.OnClientEvent:Connect(function(tradeState)
+            if tradeState then
+                mockState.lastOffer = tradeState.LastOffer
+            end
+        end)
+    end
+
+    local declineTrade = TradeRemote:FindFirstChild("DeclineTrade")
+    if declineTrade and declineTrade.OnClientEvent then
+        declineTrade.OnClientEvent:Connect(function()
+            mockState.tradeActive = false
+            mockState.tradePartner = nil
+            mockState.currentTradeRequest = nil
+            mockState.lastOffer = nil
+            resetTradeHubSession()
+        end)
+    end
+
+    local acceptTrade = TradeRemote:FindFirstChild("AcceptTrade")
+    if acceptTrade and acceptTrade.OnClientEvent then
+        acceptTrade.OnClientEvent:Connect(function(success)
+            if success then
+                showToast("Trade completed successfully!")
+            end
+            mockState.tradeActive = false
+            mockState.tradePartner = nil
+            mockState.currentTradeRequest = nil
+            mockState.lastOffer = nil
+            resetTradeHubSession()
+        end)
+    end
+end
+
+local items = {
+    {original = "Harvester",           custom = "Harvester"},
+    {original = "Gingerscope",         custom = "Gingerscope"},
+    {original = "Snowcannon",          custom = "Snowcannon"},
+    {original = "Bauble",              custom = "Bauble"},
+    {original = "BaubleChroma",        custom = "BaubleChroma"},
+    {original = "Icepiercer",          custom = "Icepiercer"},
+    {original = "TreeGun2023",         custom = "Evergun"},
+    {original = "TreeKnife2023",       custom = "Evergreen"},
+    {original = "TreeGun2023Chroma",   custom = "Chroma Evergun"},
+    {original = "TreeKnife2023Chroma", custom = "Chroma Evergreen"},
+    {original = "Bloom",               custom = "Bloom"},
+    {original = "Flora",               custom = "Flora"},
+    {original = "TravelerAxe",         custom = "Traveler Axe"},
+    {original = "TravelerGun",         custom = "Traveler Gun"},
+    {original = "TravelerAxeChroma",   custom = "Chroma Traveler Axe"},
+    {original = "TravelerGunChroma",   custom = "Chroma Traveler Gun"},
+    {original = "Celestial",           custom = "Celestial"},
+    {original = "Constellation",       custom = "Constellation"},
+    {original = "ConstellationChroma", custom = "Chroma Constellation"},
+    {original = "BaubleChroma",        custom = "Chroma Bauble"},
+    {original = "Candy",               custom = "Candy"},
+    {original = "Sugar",               custom = "Sugar"},
+    {original = "Darksword",           custom = "Darksword"},
+    {original = "Darkshot",            custom = "Darkshot"},
+    {original = "VampireAxe",          custom = "Vampire Axe"},
+    {original = "VampireGun",          custom = "Vampire Gun"},
+    {original = "SwirlyAxe",           custom = "Swirly Axe"},
+    {original = "SwirlyGun",           custom = "Swirly Gun"},
+    {original = "Flowerwood",          custom = "Flowerwood"},
+    {original = "FlowerwoodGun",       custom = "Flowerwood Gun"},
+    {original = "VampireGunChroma",    custom = "Chroma Vampire Gun"},
+    {original = "WatergunChroma",      custom = "Chroma Watergun"},
+    {original = "Turkey2023",          custom = "Turkey"},
+    {original = "Sakura_K",            custom = "Sakura"},
+    {original = "Blossom_G",           custom = "Blossom"},
+    {original = "Makeshift",           custom = "Makeshift"},
+    {original = "Sorry",               custom = "Corrupt"},
+    {original = "HeartWand",           custom = "HeartWand"},
+}
+
+shared.MM2ItemCatalog = items
+shared.MM2LocalTradeState = shared.MM2LocalTradeState or {
+    Weapons = {},
+    Pets = {},
+    Misc = {},
+}
+
+local function getCatalogItem(name)
+    for _, item in ipairs(items) do
+        if item.original == name or item.custom == name then
+            return item
+        end
+    end
+end
+
+getOwnedCount = function(originalName)
+    local ok, pd = pcall(function()
+        return require(game:GetService("ReplicatedStorage").Modules.ProfileData)
+    end)
+    if not ok or not pd or not pd.Weapons or not pd.Weapons.Owned then
+        return 0
+    end
+    return tonumber(pd.Weapons.Owned[originalName]) or 0
+end
+
+local function safeChild(parent, name)
+    if not parent then return nil end
+    return parent:FindFirstChild(name)
+end
+
+getTradeGui = function()
+    local pg = player:FindFirstChild("PlayerGui")
+    return pg and pg:FindFirstChild("TradeGUI") or nil
+end
+
+local function getTradeOfferContainer(side)
+    local gui = getTradeGui()
+    if not gui then return nil end
+    local container = safeChild(gui, "Container")
+    container = safeChild(container, "Trade")
+    container = safeChild(container, side == "Their" and "TheirOffer" or "YourOffer")
+    container = safeChild(container, "Container")
+    return container
+end
+
+local function rebuildTradeCounts(state, slots)
+    state.Weapons = {}
+    state.Pets = {}
+    state.Misc = {}
+
+    for _, slot in ipairs(slots) do
+        state[slot.ItemType] = state[slot.ItemType] or {}
+        state[slot.ItemType][slot.Key] = slot.Amount
+    end
+end
+
+local function rebuildLocalTradeCounts()
+    rebuildTradeCounts(shared.MM2LocalTradeState, shared.MM2LocalTradeSlots)
+end
+
+local function rebuildTheirTradeCounts()
+    rebuildTradeCounts(shared.MM2LocalTradeTheirState, shared.MM2LocalTradeTheirSlots)
+end
+
+local function getSyncAndItemModule()
+    local rep = game:GetService("ReplicatedStorage")
+    local db = rep:FindFirstChild("Database")
+    local modules = rep:FindFirstChild("Modules")
+    local syncObj = db and db:FindFirstChild("Sync")
+    local itemObj = modules and modules:FindFirstChild("ItemModule")
+    if not syncObj or not itemObj then
+        return nil, nil
+    end
+    local syncOk, sync = pcall(require, syncObj)
+    local itemOk, itemModule = pcall(require, itemObj)
+    if not syncOk or not itemOk then
+        return nil, nil
+    end
+    return sync, itemModule
+end
+
+local function displayLocalSlot(slotFrame, itemName, itemType, amount, removeFn)
+    local sync, itemModule = getSyncAndItemModule()
+    if not sync or not itemModule then
+        return false
+    end
+
+    local itemData = sync[itemType] and sync[itemType][itemName]
+    if not itemData then
+        return false
+    end
+
+    pcall(function()
+        itemModule.DisplayItem(slotFrame, itemData)
+    end)
+
+    local oldConn = localTradeSlotConnections[slotFrame]
+    if oldConn then
+        oldConn:Disconnect()
+        localTradeSlotConnections[slotFrame] = nil
+    end
+
+    local container = slotFrame:FindFirstChild("Container")
+    if container then
+        local amountLabel = container:FindFirstChild("Amount")
+        if amountLabel and amountLabel:IsA("TextLabel") then
+            amountLabel.Text = amount and amount > 1 and ("x" .. amount) or ""
+        end
+        local actionButton = container:FindFirstChild("ActionButton")
+        if actionButton and actionButton:IsA("GuiButton") then
+            actionButton.Visible = true
+        end
+        local gradient = container:FindFirstChild("Gradient")
+        if gradient then
+            gradient.Visible = true
+        end
+        local icon = container:FindFirstChild("Icon")
+        if icon and icon:IsA("ImageLabel") then
+            icon.Visible = true
+        end
+
+        local actionButton = container:FindFirstChild("ActionButton")
+        if actionButton and actionButton:IsA("GuiButton") then
+            localTradeSlotConnections[slotFrame] = actionButton.MouseButton1Click:Connect(function()
+                (removeFn or RemoveItemLocal)(itemName, itemType)
+            end)
+        end
+    end
+    slotFrame.Visible = true
+    return true
+end
+
+local function refreshTradeSide(side, slots, removeFn)
+    local offerContainer = getTradeOfferContainer(side)
+    if not offerContainer then
+        return
+    end
+
+    for i = 1, 4 do
+        local slot = offerContainer:FindFirstChild("NewItem" .. i)
+        if slot then
+            local data = slots[i]
+            if data then
+                local ok = displayLocalSlot(slot, data.Key, data.ItemType, data.Amount, removeFn)
+                if not ok then
+                    slot.Visible = false
+                    local oldConn = localTradeSlotConnections[slot]
+                    if oldConn then
+                        oldConn:Disconnect()
+                        localTradeSlotConnections[slot] = nil
+                    end
+                end
+            else
+                slot.Visible = false
+                local oldConn = localTradeSlotConnections[slot]
+                if oldConn then
+                    oldConn:Disconnect()
+                    localTradeSlotConnections[slot] = nil
+                end
+            end
+        end
+    end
+end
+
+refreshLocalTradeGui = function()
+    refreshTradeSide("Your", shared.MM2LocalTradeSlots, RemoveItemLocal)
+    refreshTradeSide("Their", shared.MM2LocalTradeTheirSlots, RemoveTheirItemLocal)
+end
+
+tradeHubGui = Instance.new("ScreenGui")
+tradeHubGui.Name = "MM2TradeHub"
+tradeHubGui.ResetOnSpawn = false
+tradeHubGui.IgnoreGuiInset = true
+tradeHubGui.DisplayOrder = 1001
+tradeHubGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+tradeHubGui.Parent = player:WaitForChild("PlayerGui")
+
+tradeHubFrame = Instance.new("Frame")
+tradeHubFrame.Size = UDim2.new(0, 340, 0, 320)
+tradeHubFrame.Position = UDim2.new(0.5, 160, 0.5, -160)
+tradeHubFrame.BackgroundColor3 = COLORS.BG
+tradeHubFrame.BorderSizePixel = 0
+tradeHubFrame.ClipsDescendants = true
+tradeHubFrame.Visible = false
+tradeHubFrame.ZIndex = 30
+tradeHubFrame.Parent = tradeHubGui
+Instance.new("UICorner", tradeHubFrame).CornerRadius = UDim.new(0, 18)
+local tradeHubBorder = Instance.new("UIStroke", tradeHubFrame)
+tradeHubBorder.Color = Color3.fromRGB(180, 180, 180)
+tradeHubBorder.Thickness = 1.5
+tradeHubBorder.Transparency = 0.35
+
+local tradeHubHeader = Instance.new("Frame")
+tradeHubHeader.Size = UDim2.new(1, 0, 0, 56)
+tradeHubHeader.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+tradeHubHeader.BorderSizePixel = 0
+tradeHubHeader.ZIndex = 31
+tradeHubHeader.Parent = tradeHubFrame
+Instance.new("UICorner", tradeHubHeader).CornerRadius = UDim.new(0, 18)
+
+local tradeHubHeaderFix = Instance.new("Frame")
+tradeHubHeaderFix.Size = UDim2.new(1, 0, 0, 18)
+tradeHubHeaderFix.Position = UDim2.new(0, 0, 1, -18)
+tradeHubHeaderFix.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+tradeHubHeaderFix.BorderSizePixel = 0
+tradeHubHeaderFix.ZIndex = 31
+tradeHubHeaderFix.Parent = tradeHubHeader
+makeDraggable(tradeHubHeader, tradeHubFrame)
+
+tradeHubTitleLabel = Instance.new("TextLabel")
+tradeHubTitleLabel.Size = UDim2.new(0, 220, 0, 20)
+tradeHubTitleLabel.Position = UDim2.new(0, 16, 0, 10)
+tradeHubTitleLabel.BackgroundTransparency = 1
+tradeHubTitleLabel.Text = "VISUAL TRADE HUB"
+tradeHubTitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeHubTitleLabel.Font = Enum.Font.GothamBold
+tradeHubTitleLabel.TextSize = 15
+tradeHubTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+tradeHubTitleLabel.ZIndex = 32
+tradeHubTitleLabel.Parent = tradeHubHeader
+
+local tradeHubSub = Instance.new("TextLabel")
+tradeHubSub.Size = UDim2.new(0, 250, 0, 16)
+tradeHubSub.Position = UDim2.new(0, 16, 0, 30)
+tradeHubSub.BackgroundTransparency = 1
+tradeHubSub.Text = "Local request, accept timer, and trade reveal"
+tradeHubSub.TextColor3 = COLORS.TextSub
+tradeHubSub.Font = Enum.Font.Gotham
+tradeHubSub.TextSize = 10
+tradeHubSub.TextXAlignment = Enum.TextXAlignment.Left
+tradeHubSub.ZIndex = 32
+tradeHubSub.Parent = tradeHubHeader
+
+local tradeHubClose = Instance.new("TextButton")
+tradeHubClose.Size = UDim2.new(0, 26, 0, 26)
+tradeHubClose.Position = UDim2.new(1, -38, 0.5, -13)
+tradeHubClose.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+tradeHubClose.BackgroundTransparency = 0.2
+tradeHubClose.Text = "X"
+tradeHubClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeHubClose.Font = Enum.Font.GothamBold
+tradeHubClose.TextSize = 11
+tradeHubClose.BorderSizePixel = 0
+tradeHubClose.AutoButtonColor = false
+tradeHubClose.ZIndex = 32
+tradeHubClose.Parent = tradeHubHeader
+Instance.new("UICorner", tradeHubClose).CornerRadius = UDim.new(0, 7)
+
+tradeHubTargetBox = Instance.new("TextBox")
+tradeHubTargetBox.Size = UDim2.new(1, -24, 0, 34)
+tradeHubTargetBox.Position = UDim2.new(0, 12, 0, 74)
+tradeHubTargetBox.BackgroundColor3 = COLORS.Panel
+tradeHubTargetBox.BorderSizePixel = 0
+tradeHubTargetBox.Text = ""
+tradeHubTargetBox.PlaceholderText = "Enter any nickname..."
+tradeHubTargetBox.PlaceholderColor3 = COLORS.TextDim
+tradeHubTargetBox.TextColor3 = COLORS.Text
+tradeHubTargetBox.Font = Enum.Font.Gotham
+tradeHubTargetBox.TextSize = 13
+tradeHubTargetBox.ClearTextOnFocus = false
+tradeHubTargetBox.ZIndex = 31
+tradeHubTargetBox.Parent = tradeHubFrame
+Instance.new("UICorner", tradeHubTargetBox).CornerRadius = UDim.new(0, 10)
+local tradeHubBoxStroke = Instance.new("UIStroke", tradeHubTargetBox)
+tradeHubBoxStroke.Color = COLORS.Border
+tradeHubBoxStroke.Thickness = 1
+tradeHubBoxStroke.Transparency = 0.4
+
+tradeHubTargetBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        startLocalTradeSession()
+    end
+end)
+
+local tradeHubStartBtn = Instance.new("TextButton")
+tradeHubStartBtn.Size = UDim2.new(1, -24, 0, 38)
+tradeHubStartBtn.Position = UDim2.new(0, 12, 0, 116)
+tradeHubStartBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+tradeHubStartBtn.Text = "SEND LOCAL REQUEST"
+tradeHubStartBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+tradeHubStartBtn.Font = Enum.Font.GothamBold
+tradeHubStartBtn.TextSize = 11
+tradeHubStartBtn.BorderSizePixel = 0
+tradeHubStartBtn.AutoButtonColor = false
+tradeHubStartBtn.ZIndex = 31
+tradeHubStartBtn.Parent = tradeHubFrame
+Instance.new("UICorner", tradeHubStartBtn).CornerRadius = UDim.new(0, 10)
+
+tradeHubTargetLabel = Instance.new("TextLabel")
+tradeHubTargetLabel.Size = UDim2.new(1, -24, 0, 18)
+tradeHubTargetLabel.Position = UDim2.new(0, 12, 0, 164)
+tradeHubTargetLabel.BackgroundTransparency = 1
+tradeHubTargetLabel.Text = "Target: none"
+tradeHubTargetLabel.TextColor3 = COLORS.Text
+tradeHubTargetLabel.Font = Enum.Font.GothamBold
+tradeHubTargetLabel.TextSize = 11
+tradeHubTargetLabel.TextXAlignment = Enum.TextXAlignment.Left
+tradeHubTargetLabel.ZIndex = 31
+tradeHubTargetLabel.Parent = tradeHubFrame
+
+tradeHubStatusLabel = Instance.new("TextLabel")
+tradeHubStatusLabel.Size = UDim2.new(1, -24, 0, 18)
+tradeHubStatusLabel.Position = UDim2.new(0, 12, 0, 186)
+tradeHubStatusLabel.BackgroundTransparency = 1
+tradeHubStatusLabel.Text = "Status: idle"
+tradeHubStatusLabel.TextColor3 = COLORS.TextSub
+tradeHubStatusLabel.Font = Enum.Font.Gotham
+tradeHubStatusLabel.TextSize = 11
+tradeHubStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+tradeHubStatusLabel.ZIndex = 31
+tradeHubStatusLabel.Parent = tradeHubFrame
+
+tradeHubTimerLabel = Instance.new("TextLabel")
+tradeHubTimerLabel.Size = UDim2.new(1, -24, 0, 18)
+tradeHubTimerLabel.Position = UDim2.new(0, 12, 0, 208)
+tradeHubTimerLabel.BackgroundTransparency = 1
+tradeHubTimerLabel.Text = "Timer: idle"
+tradeHubTimerLabel.TextColor3 = COLORS.TextSub
+tradeHubTimerLabel.Font = Enum.Font.Gotham
+tradeHubTimerLabel.TextSize = 11
+tradeHubTimerLabel.TextXAlignment = Enum.TextXAlignment.Left
+tradeHubTimerLabel.ZIndex = 31
+tradeHubTimerLabel.Parent = tradeHubFrame
+
+local tradeHubTheirBtn = Instance.new("TextButton")
+tradeHubTheirBtn.Size = UDim2.new(1, -24, 0, 28)
+tradeHubTheirBtn.Position = UDim2.new(0, 12, 0, 232)
+tradeHubTheirBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+tradeHubTheirBtn.Text = "OPEN THEIR OFFER"
+tradeHubTheirBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeHubTheirBtn.Font = Enum.Font.GothamBold
+tradeHubTheirBtn.TextSize = 10
+tradeHubTheirBtn.BorderSizePixel = 0
+tradeHubTheirBtn.AutoButtonColor = false
+tradeHubTheirBtn.ZIndex = 31
+tradeHubTheirBtn.Parent = tradeHubFrame
+Instance.new("UICorner", tradeHubTheirBtn).CornerRadius = UDim.new(0, 9)
+
+tradeHubOpenBtn = Instance.new("TextButton")
+tradeHubOpenBtn.Size = UDim2.new(0, 46, 0, 46)
+tradeHubOpenBtn.Position = UDim2.new(1, -58, 1, -214)
+tradeHubOpenBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+tradeHubOpenBtn.Text = "VTRD"
+tradeHubOpenBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+tradeHubOpenBtn.Font = Enum.Font.GothamBold
+tradeHubOpenBtn.TextSize = 9
+tradeHubOpenBtn.BorderSizePixel = 0
+tradeHubOpenBtn.AutoButtonColor = false
+tradeHubOpenBtn.ZIndex = 10
+tradeHubOpenBtn.Parent = screenGui
+Instance.new("UICorner", tradeHubOpenBtn).CornerRadius = UDim.new(0, 13)
+local tradeHubOpenGrad = Instance.new("UIGradient", tradeHubOpenBtn)
+tradeHubOpenGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 100, 100)),
+})
+tradeHubOpenGrad.Rotation = 135
+local tradeHubOpenStroke = Instance.new("UIStroke", tradeHubOpenBtn)
+tradeHubOpenStroke.Color = Color3.fromRGB(255, 255, 255)
+tradeHubOpenStroke.Thickness = 1.5
+tradeHubOpenStroke.Transparency = 0.3
+
+tradeHubOpenBtn.MouseEnter:Connect(function()
+    tween(tradeHubOpenBtn, 0.15, {Size = UDim2.new(0,50,0,50), Position = UDim2.new(1,-60,1,-216)}):Play()
+    tween(tradeHubOpenGrad, 0.15, {Rotation = 115}):Play()
+end)
+tradeHubOpenBtn.MouseLeave:Connect(function()
+    tween(tradeHubOpenBtn, 0.15, {Size = UDim2.new(0,46,0,46), Position = UDim2.new(1,-58,1,-214)}):Play()
+    tween(tradeHubOpenGrad, 0.15, {Rotation = 135}):Play()
+end)
+
+tradeHubAcceptBtn = Instance.new("TextButton")
+tradeHubAcceptBtn.Size = UDim2.new(1, -24, 0, 34)
+tradeHubAcceptBtn.Position = UDim2.new(0, 12, 1, -46)
+tradeHubAcceptBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+tradeHubAcceptBtn.Text = "ACCEPT"
+tradeHubAcceptBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+tradeHubAcceptBtn.Font = Enum.Font.GothamBold
+tradeHubAcceptBtn.TextSize = 12
+tradeHubAcceptBtn.BorderSizePixel = 0
+tradeHubAcceptBtn.AutoButtonColor = false
+tradeHubAcceptBtn.ZIndex = 31
+tradeHubAcceptBtn.Parent = tradeHubFrame
+Instance.new("UICorner", tradeHubAcceptBtn).CornerRadius = UDim.new(0, 10)
+
+tradeHubStartBtn.MouseButton1Click:Connect(function()
+    if startLocalTradeSession() then
+        tradeHubFrame.Visible = true
+    end
+end)
+
+tradeHubAcceptBtn.MouseButton1Click:Connect(function()
+    acceptLocalTrade()
+end)
+
+tradeHubTheirBtn.MouseButton1Click:Connect(function()
+    if theirPickerFrame then
+        theirPickerFrame.Visible = not theirPickerFrame.Visible
+        if theirPickerFrame.Visible then
+            refreshTheirPicker("")
+        end
+    end
+end)
+
+tradeHubClose.MouseButton1Click:Connect(function()
+    resetTradeHubSession()
+    tradeHubFrame.Visible = false
+end)
+
+tradeHubOpenBtn.MouseButton1Click:Connect(function()
+    tradeHubFrame.Visible = not tradeHubFrame.Visible
+    if tradeHubFrame.Visible then
+        updateTradeHubUI()
+        initTradeSystem()
+    end
+end)
+
+updateTradeHubUI()
+
+task.spawn(function()
+    local pg = player:WaitForChild("PlayerGui")
+    local function scheduleRefresh()
+        task.defer(function()
+            task.wait(0.15)
+            refreshLocalTradeGui()
+        end)
+    end
+
+    if pg:FindFirstChild("TradeGUI") then
+        scheduleRefresh()
+    end
+
+    pg.ChildAdded:Connect(function(child)
+        if child.Name == "TradeGUI" then
+            scheduleRefresh()
+        end
+    end)
+end)
+
+local function resolveTradeBucket(category)
+    category = category or "Weapons"
+    shared.MM2LocalTradeState[category] = shared.MM2LocalTradeState[category] or {}
+    return shared.MM2LocalTradeState[category]
+end
+
+function OfferItemLocal(itemName, category, side)
+    local item = getCatalogItem(itemName)
+    local key = item and item.original or itemName
+    local itemType = category or (item and item.category) or "Weapons"
+    local slots = side == "Their" and shared.MM2LocalTradeTheirSlots or shared.MM2LocalTradeSlots
+    local slot
+    for _, existing in ipairs(slots) do
+        if existing.Key == key and existing.ItemType == itemType then
+            slot = existing
+            break
+        end
+    end
+
+    if slot then
+        slot.Amount += 1
+    elseif #slots < 4 then
+        table.insert(slots, {
+            Key = key,
+            ItemType = itemType,
+            Amount = 1,
+        })
+    else
+        return false
+    end
+
+    if side == "Their" then
+        rebuildTheirTradeCounts()
+    else
+        rebuildLocalTradeCounts()
+    end
+    if shared.MM2RefreshTradeInventory then
+        pcall(shared.MM2RefreshTradeInventory)
+    end
+    refreshLocalTradeGui()
+    return true
+end
+
+function OfferTheirItemLocal(itemName, category)
+    return OfferItemLocal(itemName, category, "Their")
+end
+
+function OfferOwnedItemLocal(itemName, category, side)
+    local item = getCatalogItem(itemName)
+    local key = item and item.original or itemName
+    if getOwnedCount(key) <= 0 then
+        return false, "not_owned"
+    end
+    return OfferItemLocal(key, category or (item and item.category) or "Weapons", side)
+end
+
+function OfferOwnedItemLocalToTheir(itemName, category)
+    return OfferOwnedItemLocal(itemName, category, "Their")
+end
+
+function RemoveItemLocal(itemName, category, side)
+    local item = getCatalogItem(itemName)
+    local key = item and item.original or itemName
+    local itemType = category or (item and item.category) or "Weapons"
+    local slots = side == "Their" and shared.MM2LocalTradeTheirSlots or shared.MM2LocalTradeSlots
+    for index, existing in ipairs(slots) do
+        if existing.Key == key and existing.ItemType == itemType then
+            existing.Amount -= 1
+            if existing.Amount <= 0 then
+                table.remove(slots, index)
+            end
+            if side == "Their" then
+                rebuildTheirTradeCounts()
+            else
+                rebuildLocalTradeCounts()
+            end
+            if shared.MM2RefreshTradeInventory then
+                pcall(shared.MM2RefreshTradeInventory)
+            end
+            refreshLocalTradeGui()
+            return true
+        end
+    end
+    return false
+end
+
+function RemoveTheirItemLocal(itemName, category)
+    return RemoveItemLocal(itemName, category, "Their")
+end
+
+function ClearLocalTrade(category)
+    if category then
+        for i = #shared.MM2LocalTradeSlots, 1, -1 do
+            if shared.MM2LocalTradeSlots[i].ItemType == category then
+                table.remove(shared.MM2LocalTradeSlots, i)
+            end
+        end
+    else
+        table.clear(shared.MM2LocalTradeSlots)
+    end
+    rebuildLocalTradeCounts()
+    if shared.MM2RefreshTradeInventory then
+        pcall(shared.MM2RefreshTradeInventory)
+    end
+    refreshLocalTradeGui()
+end
+
+function ClearTheirLocalTrade(category)
+    if category then
+        for i = #shared.MM2LocalTradeTheirSlots, 1, -1 do
+            if shared.MM2LocalTradeTheirSlots[i].ItemType == category then
+                table.remove(shared.MM2LocalTradeTheirSlots, i)
+            end
+        end
+    else
+        table.clear(shared.MM2LocalTradeTheirSlots)
+    end
+    rebuildTheirTradeCounts()
+    if shared.MM2RefreshTradeInventory then
+        pcall(shared.MM2RefreshTradeInventory)
+    end
+    refreshLocalTradeGui()
+end
+
+local function getItemTypeLabel(name)
+    if name:find("Chroma") then
+        return "CHR", Color3.fromRGB(255, 255, 255)
+    end
+    local lower = name:lower()
+    if lower:find("gun") or lower:find("cannon") or lower:find("scope") or lower:find("shot") then
+        return "GUN", Color3.fromRGB(200, 200, 200)
+    end
+    return "KNF", Color3.fromRGB(160, 160, 160)
+end
+
+selectedItem = nil
+local itemButtons  = {}
+
+local function getPreviewItemLabel(originalName)
+    for _, item in ipairs(items) do
+        if item.original == originalName then
+            return item.custom, getItemTypeLabel(item.custom)
+        end
+    end
+    return originalName, getItemTypeLabel(originalName)
+end
+
+for i, item in ipairs(items) do
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = COLORS.Card
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.BorderSizePixel = 0
+    row.LayoutOrder = i
+    row.ClipsDescendants = true
+    row.ZIndex = 5
+    row.Parent = scrollFrame
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+    local rowStroke = Instance.new("UIStroke", row)
+    rowStroke.Color = Color3.fromRGB(180, 180, 180)
+    rowStroke.Thickness = 1
+    rowStroke.Transparency = 1
+
+    local indicator = Instance.new("Frame")
+    indicator.Size = UDim2.new(0, 3, 0.65, 0)
+    indicator.Position = UDim2.new(0, 0, 0.175, 0)
+    indicator.BackgroundColor3 = Color3.fromRGB(220, 220, 220)
+    indicator.BackgroundTransparency = 1
+    indicator.BorderSizePixel = 0
+    indicator.ZIndex = 6
+    indicator.Parent = row
+    Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 2)
+
+    local typeLabel, typeColor = getItemTypeLabel(item.custom)
+    local badge = Instance.new("TextLabel")
+    badge.Size = UDim2.new(0, 32, 0, 18)
+    badge.Position = UDim2.new(0, 7, 0.5, -9)
+    badge.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    badge.BackgroundTransparency = 0.3
+    badge.Text = typeLabel
+    badge.TextColor3 = typeColor
+    badge.Font = Enum.Font.GothamBold
+    badge.TextSize = 9
+    badge.ZIndex = 6
+    badge.Parent = row
+    Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 4)
+    local badgeStroke = Instance.new("UIStroke", badge)
+    badgeStroke.Color = typeColor
+    badgeStroke.Thickness = 1
+    badgeStroke.Transparency = 0.6
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -120, 1, 0)
+    label.Position = UDim2.new(0, 46, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = item.custom
+    label.TextColor3 = COLORS.TextSub
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.ZIndex = 6
+    label.Parent = row
+
+    local selTag = Instance.new("Frame")
+    selTag.Size = UDim2.new(0, 62, 0, 20)
+    selTag.Position = UDim2.new(1, -68, 0.5, -10)
+    selTag.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+    selTag.BackgroundTransparency = 1
+    selTag.BorderSizePixel = 0
+    selTag.ZIndex = 6
+    selTag.Parent = row
+    Instance.new("UICorner", selTag).CornerRadius = UDim.new(0, 5)
+    local selTagStroke = Instance.new("UIStroke", selTag)
+    selTagStroke.Color = Color3.fromRGB(200, 200, 200)
+    selTagStroke.Thickness = 1
+    selTagStroke.Transparency = 1
+
+    local selTagText = Instance.new("TextLabel")
+    selTagText.Size = UDim2.new(1, 0, 1, 0)
+    selTagText.BackgroundTransparency = 1
+    selTagText.Text = "ACTIVE"
+    selTagText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    selTagText.Font = Enum.Font.GothamBold
+    selTagText.TextSize = 9
+    selTagText.TextTransparency = 1
+    selTagText.ZIndex = 7
+    selTagText.Parent = selTag
+
+    row.MouseEnter:Connect(function()
+        if selectedItem ~= item then
+            tween(row,       0.15, {BackgroundColor3 = COLORS.CardHover}):Play()
+            tween(label,     0.15, {TextColor3 = COLORS.Text}):Play()
+            tween(indicator, 0.15, {BackgroundTransparency = 0.6}):Play()
+            tween(badgeStroke, 0.15, {Transparency = 0.3}):Play()
+        end
+    end)
+    row.MouseLeave:Connect(function()
+        if selectedItem ~= item then
+            tween(row,       0.15, {BackgroundColor3 = COLORS.Card}):Play()
+            tween(label,     0.15, {TextColor3 = COLORS.TextSub}):Play()
+            tween(indicator, 0.15, {BackgroundTransparency = 1}):Play()
+            tween(badgeStroke, 0.15, {Transparency = 0.6}):Play()
+        end
+    end)
+
+    row.MouseButton1Click:Connect(function()
+        if selectedItem == item then
+            local originalName = item.original
+            if getOwnedCount(originalName) <= 0 then
+                showToast("You do not own this item.", true)
+                return
+            end
+            local ok = OfferOwnedItemLocal(item.custom, "Weapons")
+            if ok then
+                showToast(item.custom .. " added to NewItem!")
+            else
+                showToast("Local trade slots are full.", true)
+            end
+            return
+        end
+
+        if selectedItem then
+            for _, d in ipairs(itemButtons) do
+                if d.item == selectedItem then
+                    tween(d.row,        0.2, {BackgroundColor3 = COLORS.Card}):Play()
+                    tween(d.stroke,     0.2, {Transparency = 1}):Play()
+                    tween(d.label,      0.2, {TextColor3 = COLORS.TextSub}):Play()
+                    tween(d.indicator,  0.2, {BackgroundTransparency = 1}):Play()
+                    tween(d.selTag,     0.2, {BackgroundTransparency = 1}):Play()
+                    tween(d.selStroke,  0.2, {Transparency = 1}):Play()
+                    tween(d.selTagText, 0.2, {TextTransparency = 1}):Play()
+                end
+            end
+        end
+
+        selectedItem = item
+
+        tween(row,        0.2, {BackgroundColor3 = Color3.fromRGB(35, 35, 35)}):Play()
+        tween(rowStroke,  0.2, {Transparency = 0.55}):Play()
+        tween(label,      0.2, {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+        tween(indicator,  0.2, {BackgroundTransparency = 0}):Play()
+        tween(selTag,     0.2, {BackgroundTransparency = 0.75}):Play()
+        tween(selTagStroke, 0.2, {Transparency = 0.3}):Play()
+        tween(selTagText, 0.2, {TextTransparency = 0}):Play()
+    end)
+
+    table.insert(itemButtons, {
+        row = row, label = label, badge = badge,
+        indicator = indicator,
+        selTag = selTag, selStroke = selTagStroke, selTagText = selTagText,
+        stroke = rowStroke, item = item
+    })
+end
+
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, #items * 40 + 12)
+
+local function filterItems(text)
+    text = text:lower()
+    local visible = 0
+    for _, d in ipairs(itemButtons) do
+        local show = text == "" or d.item.custom:lower():find(text, 1, true)
+        d.row.Visible = show
+        if show then
+            visible += 1
+            d.row.LayoutOrder = visible
+        end
+    end
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, visible * 40 + 12)
+    countLabel.Text = visible == #items
+        and ("All items  |  " .. #items .. " total")
+        or  (visible .. " of " .. #items .. " found")
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    filterItems(searchBox.Text)
+end)
+
+-- ═══════════════════════════════════════
+--        ВИЗУАЛЬНАЯ СИСТЕМА ОРУЖИЙ
+-- ═══════════════════════════════════════
+local WeaponVisuals = {
+    Harvester = {
+        ItemType  = "Gun",
+        MeshId    = "rbxassetid://7775027413",
+        TextureId = "rbxassetid://7775245551",
+        Scale     = Vector3.new(0.060, 0.060, 0.060),
+        Rotation  = Vector3.new(0, -40, 90),
+    },
+    Gingerscope = {
+        ItemType  = "Gun",
+        MeshId    = "rbxassetid://15374602183",
+        TextureId = "rbxassetid://15409041564",
+        Scale     = Vector3.new(0.085, 0.085, 0.085),
+        Rotation  = Vector3.new(-40, 0, 0),
+    },
+    Snowcannon = {
+        ItemType  = "Gun",
+        MeshId    = "rbxassetid://99836890880541",
+        TextureId = "rbxassetid://122392330922281",
+        Scale     = Vector3.new(0.060, 0.060, 0.060),
+        Rotation  = Vector3.new(-40, 0, 0),
+    },
+    Bauble = {
+    ItemType  = "Gun",
+    MeshId    = "rbxassetid://107813118898769",
+    TextureId = "rbxassetid://137012201908941",
+    Scale     = Vector3.new(0.060, 0.060, 0.060),
+    Rotation  = Vector3.new(-40, 0, 0),
+    },
+    BaubleChroma = {
+        ItemType   = "Gun",
+        MeshId     = "rbxassetid://107813118898769",
+        TextureId  = "rbxassetid://137012201908941",
+        Scale      = Vector3.new(0.060, 0.060, 0.060),
+        Rotation   = Vector3.new(-40, 0, 0),
+        Material   = Enum.Material.Neon,
+        Color      = Color3.fromRGB(255, 255, 255),
+        DecalId    = "rbxassetid://129391884956433",
+        DecalFace  = Enum.NormalId.Front,
+        DecalName  = "ChromaDecal",
+        Chroma     = true,
+    },
+    TreeGun2023 = {
+    ItemType  = "Gun",
+    MeshId    = "rbxassetid://15408863676",
+    TextureId = "",
+    Scale     = Vector3.new(0.085, 0.085, 0.085),
+    Rotation  = Vector3.new(-40, 0, 0),
+    },
+    TravelerAxe = {
+        ItemType  = "Knife",
+        MeshId    = "rbxassetid://15057341638",
+        TextureId = "rbxassetid://15057460725",
+        Scale     = Vector3.new(0.085, 0.085, 0.085),
+        Rotation  = Vector3.new(0, 0, 0),
+    },
+    HeartWand = {
+        ItemType  = "Knife",
+        MeshId    = "rbxassetid://77738838473091",
+        TextureId = "rbxassetid://76246633927299",
+        Scale     = Vector3.new(0.085, 0.085, 0.085),
+        Rotation  = Vector3.new(0, 0, 0),
+    },
+    Turkey2023 = {
+        ItemType  = "Knife",
+        MeshId    = "rbxassetid://15414904040",
+        TextureId = "rbxassetid://15414905407",
+        Scale     = Vector3.new(0.060, 0.060, 0.060),
+        Rotation  = Vector3.new(0, 0, 0),
+    },
+
+}
+
+local vs = { Gun = {active=nil,def=nil}, Knife = {active=nil,def=nil} }
+local activeChroma = {Gun=nil, Knife=nil}
+local watcherPaused = false
+
+local function getMyDisplay(itemType)
+    local char = player.Character
+    if not char then return nil end
+    local WD = game.Workspace:FindFirstChild("WeaponDisplays")
+    if not WD then return nil end
+    local name = itemType == "Gun" and "GunDisplay" or "KnifeDisplay"
+    for _, d in pairs(WD:GetChildren()) do
+        if d.Name == name then
+            local rc = d:FindFirstChildOfClass("RigidConstraint")
+            if rc and rc.Attachment0 and rc.Attachment0:IsDescendantOf(char) then return d end
+        end
+    end
+end
+
+local function getDisplayParts(display)
+    local parts = {}
+    if display:IsA("BasePart") then
+        table.insert(parts, display)
+    end
+    for _, obj in ipairs(display:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            table.insert(parts, obj)
+        end
+    end
+    return parts
+end
+
+local function writeMesh(display, itemType, meshId, textureId, scale, rotation, material, color, defAttCFrame, decalId, decalFace, decalName)
+    local parts = getDisplayParts(display)
+    if #parts == 0 and display:IsA("BasePart") then
+        table.insert(parts, display)
+    end
+
+    for _, part in ipairs(parts) do
+        -- Применяем меш и текстуру
+        if part:IsA("MeshPart") then
+            pcall(function() part.MeshId = meshId end)
+            pcall(function() part.TextureID = textureId end)
+        else
+            local sm = part:FindFirstChildOfClass("SpecialMesh")
+            if sm then
+                sm.MeshId = meshId; sm.TextureId = textureId
+                sm.Offset = Vector3.new(0,0,0); sm.VertexColor = Vector3.new(1,1,1)
+                if scale then sm.Scale = scale end
+            end
+        end
+
+        -- СНАЧАЛА Material, ПОТОМ Color - это критично для Neon!
+        if material then
+            pcall(function() part.Material = material end)
+        end
+        if color then
+            pcall(function() part.Color = color end)
+        end
+
+        if decalId and decalName then
+            local decal = part:FindFirstChild(decalName)
+            if not decal then
+                decal = Instance.new("Decal")
+                decal.Name = decalName
+                decal.Parent = part
+            end
+            decal.Texture = decalId
+            decal.Face = decalFace or Enum.NormalId.Front
+        end
+    end
+
+    local att = display:FindFirstChildOfClass("Attachment")
+    if not att then
+        for _, descendant in ipairs(display:GetDescendants()) do
+            if descendant:IsA("Attachment") then
+                att = descendant
+                break
+            end
+        end
+    end
+    if att then
+        local pos = att.CFrame.Position
+        local baseRot = (defAttCFrame and defAttCFrame.AttRotation) or (att.CFrame - pos)
+        if rotation then
+            att.CFrame = CFrame.new(pos) * baseRot * CFrame.Angles(math.rad(rotation.X), math.rad(rotation.Y), math.rad(rotation.Z))
+        else
+            att.CFrame = CFrame.new(pos) * baseRot
+        end
+    end
+end
+
+local function captureDefault(display, itemType)
+    if vs[itemType].def then return end
+    local def = {}
+    local att = display:FindFirstChildOfClass("Attachment")
+    if not att then
+        for _, descendant in ipairs(display:GetDescendants()) do
+            if descendant:IsA("Attachment") then
+                att = descendant
+                break
+            end
+        end
+    end
+    def.AttRotation = att and (att.CFrame - att.CFrame.Position) or nil
+
+    local parts = getDisplayParts(display)
+    local targetPart = parts[1]
+    if not targetPart and display:IsA("BasePart") then
+        targetPart = display
+    end
+
+    if targetPart and targetPart:IsA("MeshPart") then
+        local ok1, mid = pcall(function() return targetPart.MeshId end)
+        local ok2, tid = pcall(function() return targetPart.TextureID end)
+        def.MeshId = (ok1 and mid) or ""; def.TextureId = (ok2 and tid) or ""; def.Scale = nil
+    else
+        local sm
+        if targetPart then sm = targetPart:FindFirstChildOfClass("SpecialMesh") end
+        if not sm then
+            for _, part in ipairs(parts) do
+                sm = part:FindFirstChildOfClass("SpecialMesh")
+                if sm then break end
+            end
+        end
+        if sm then def.MeshId = sm.MeshId; def.TextureId = sm.TextureId; def.Scale = sm.Scale
+        else def.MeshId = ""; def.TextureId = "" end
+    end
+
+    if targetPart and targetPart:IsA("BasePart") then
+        local ok3, mat = pcall(function() return targetPart.Material end)
+        local ok4, col = pcall(function() return targetPart.Color end)
+        def.Material = (ok3 and mat) or Enum.Material.Plastic
+        def.Color = (ok4 and col) or Color3.new(1,1,1)
+    else
+        def.Material = Enum.Material.Plastic
+        def.Color = Color3.new(1,1,1)
+    end
+    vs[itemType].def = def
+end
+
+local function applyVisual(weaponName)
+    local data = WeaponVisuals[weaponName]
+    if not data then return false end
+    local itype = data.ItemType
+    local display = getMyDisplay(itype)
+    if not display then return false end
+    captureDefault(display, itype)
+    writeMesh(display, itype, data.MeshId, data.TextureId, data.Scale, data.Rotation, data.Material, data.Color, vs[itype].def, data.DecalId, data.DecalFace, data.DecalName)
+    if data.Chroma then activeChroma[itype] = display else activeChroma[itype] = nil end
+    vs[itype].active = weaponName
+    return true
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.06)
+        for itype, display in pairs(activeChroma) do
+            if display and display.Parent then
+                local hue = (tick() * 0.18) % 1
+                local color = Color3.fromHSV(hue, 1, 1)
+                for _, part in ipairs(getDisplayParts(display)) do
+                    pcall(function()
+                        part.Material = Enum.Material.Neon
+                        part.Color = color
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+local function resetToDefault(itemType, defSnap)
+    if not defSnap or defSnap.MeshId == "" then vs[itemType].active = nil; activeChroma[itemType] = nil; return false end
+    local display = getMyDisplay(itemType)
+    if not display then return false end
+    writeMesh(display, itemType, defSnap.MeshId, defSnap.TextureId, defSnap.Scale, nil, defSnap.Material, defSnap.Color, defSnap, nil, nil, nil)
+    for _, part in ipairs(getDisplayParts(display)) do
+        for _, decal in ipairs(part:GetChildren()) do
+            if decal:IsA("Decal") and decal.Name == "ChromaDecal" then decal:Destroy() end
+        end
+    end
+    vs[itemType].active = nil
+    activeChroma[itemType] = nil
+    return true
+end
+
+local function getProfileEquipped(itemType)
+    local ok, pd = pcall(function() return require(game:GetService("ReplicatedStorage").Modules.ProfileData) end)
+    if not ok or not pd then return nil end
+    local eq = pd.Weapons and pd.Weapons.Equipped
+    return eq and eq[itemType] or nil
+end
+
+local function onDisplayAdded(display)
+    local itemType
+    if display.Name == "GunDisplay" then itemType = "Gun"
+    elseif display.Name == "KnifeDisplay" then itemType = "Knife"
+    else return end
+    for i = 1, 15 do
+        task.wait(0.2)
+        local char = player.Character
+        if not char then return end
+        local rc = display:FindFirstChildOfClass("RigidConstraint")
+        if rc and rc.Attachment0 and rc.Attachment0:IsDescendantOf(char) then break end
+        if i == 15 then return end
+    end
+    vs[itemType].active = nil; vs[itemType].def = nil
+    local name = getProfileEquipped(itemType)
+    if name and WeaponVisuals[name] then task.wait(0.15); applyVisual(name) end
+end
+
+task.spawn(function()
+    local WD = game.Workspace:WaitForChild("WeaponDisplays", 10)
+    if not WD then return end
+    for _, d in pairs(WD:GetChildren()) do task.spawn(onDisplayAdded, d) end
+    WD.ChildAdded:Connect(function(d) task.spawn(onDisplayAdded, d) end)
+    WD.ChildRemoved:Connect(function(d)
+        local itype = d.Name == "GunDisplay" and "Gun" or (d.Name == "KnifeDisplay" and "Knife" or nil)
+        if itype then vs[itype].active = nil; vs[itype].def = nil end
+    end)
+end)
+
+task.spawn(function()
+    local last = {Gun=nil,Knife=nil}
+    local ok0, pd0 = pcall(function() return require(game:GetService("ReplicatedStorage").Modules.ProfileData) end)
+    if ok0 and pd0 and pd0.Weapons and pd0.Weapons.Equipped then
+        last.Gun = pd0.Weapons.Equipped.Gun; last.Knife = pd0.Weapons.Equipped.Knife
+    end
+    local pending = {}
+    while true do
+        task.wait(0.3)
+        if watcherPaused then continue end
+        local ok, pd = pcall(function() return require(game:GetService("ReplicatedStorage").Modules.ProfileData) end)
+        if not ok or not pd then continue end
+        local eq = pd.Weapons and pd.Weapons.Equipped
+        if not eq then continue end
+        for _, itype in ipairs({"Gun","Knife"}) do
+            local cur = eq[itype]
+            if cur ~= last[itype] then
+                local prev = last[itype]; last[itype] = cur
+                if cur and WeaponVisuals[cur] then
+                    pending[itype] = {action="apply",name=cur,attempts=0}
+                elseif prev and WeaponVisuals[prev] then
+                    pending[itype] = {action="reset",defSnap=vs[itype].def,attempts=0}
+                end
+            end
+        end
+        for itype, job in pairs(pending) do
+            if job.action == "apply" then
+                if applyVisual(job.name) then pending[itype]=nil
+                else job.attempts+=1; if job.attempts>=20 then pending[itype]=nil end end
+            elseif job.action == "reset" then
+                if resetToDefault(itype,job.defSnap) then pending[itype]=nil
+                else job.attempts+=1; if job.attempts>=20 then pending[itype]=nil end end
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════
+--           SPAWN ЛОГИКА
+-- ═══════════════════════════════════════
+local function spawnItem(name)
+    local PlayerData = require(game:GetService("ReplicatedStorage").Modules.ProfileData)
+    local PlayerWeapons = PlayerData.Weapons
+    local originalName = name
+    for _, item in ipairs(items) do
+        if item.custom == name then originalName = item.original; break end
+    end
+
+    if not PlayerWeapons.Owned[originalName] then
+        PlayerWeapons.Owned[originalName] = 1
+    else
+        PlayerWeapons.Owned[originalName] += 1
+    end
+    PlayerData.Weapons = PlayerWeapons
+    local Remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+    if Remotes then
+        local inv = Remotes:FindFirstChild("Inventory")
+        if inv then
+            local ce = inv:FindFirstChild("ChangeInventoryItem")
+            if ce then pcall(function() ce:FireServer(originalName, "Add") end) end
+            local dc = inv:FindFirstChild("InventoryDataChanged")
+            if dc then pcall(function() dc:Fire() end) end
+        end
+    end
+end
+
+local function showProgress(itemName)
+    spawnBtn.Visible = false
+    progressBG.Visible = true
+    local totalTime = 3
+    local startTime = tick()
+    while tick() - startTime < totalTime do
+        local p = (tick() - startTime) / totalTime
+        progressLabel.Text = "Adding:  " .. itemName
+        tween(progressFill, 0.08, {Size = UDim2.new(p, 0, 1, 0)}):Play()
+        task.wait(0.05)
+    end
+    tween(progressFill, 0.2, {Size = UDim2.new(1,0,1,0), BackgroundColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+    progressLabel.Text = "Done!"
+    task.wait(0.9)
+    progressFill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+    progressFill.Size = UDim2.new(0,0,1,0)
+    progressBG.Visible = false
+    spawnBtn.Visible = true
+end
+
+spawnBtn.MouseButton1Click:Connect(function()
+    if not selectedItem then
+        local orig = searchOuter.Position
+        for i = 1, 4 do
+            tween(searchOuter, 0.05, {Position = UDim2.new(orig.X.Scale, orig.X.Offset+8, orig.Y.Scale, orig.Y.Offset)}):Play()
+            task.wait(0.055)
+            tween(searchOuter, 0.05, {Position = UDim2.new(orig.X.Scale, orig.X.Offset-8, orig.Y.Scale, orig.Y.Offset)}):Play()
+            task.wait(0.055)
+        end
+        tween(searchOuter, 0.05, {Position = orig}):Play()
+        showToast("Select an item first!", true)
+        return
+    end
+    local capturedItem = selectedItem
+    task.spawn(function() showProgress(capturedItem.custom) end)
+    watcherPaused = true
+    spawnItem(capturedItem.custom)
+    showToast(capturedItem.custom .. " added!")
+    task.delay(4, function() watcherPaused = false end)
+end)
+
+-- ═══════════════════════════════════════
+--       ОТКРЫТЬ / ЗАКРЫТЬ GUI
+-- ═══════════════════════════════════════
+local isOpen = false
+
+local function openGUI()
+    isOpen = true
+    mainFrame.Visible = true
+    outerGlow.Visible = true
+    mainFrame.Size = UDim2.new(0, 360, 0, 0)
+    mainFrame.Position = UDim2.new(0.5, -180, 0.5, 0)
+    outerGlow.Position = UDim2.new(0.5, -202, 0.5, -267)
+    outerGlow.BackgroundTransparency = 1
+    tween(mainFrame, 0.5, {Size = UDim2.new(0,360,0,490), Position = UDim2.new(0.5,-180,0.5,-245)}, Enum.EasingStyle.Back):Play()
+    tween(outerGlow, 0.6, {BackgroundTransparency = 0.92}):Play()
+end
+
+local function closeGUI()
+    isOpen = false
+    tween(mainFrame, 0.3, {Size = UDim2.new(0,360,0,0), Position = UDim2.new(0.5,-180,0.5,0)}, Enum.EasingStyle.Back, Enum.EasingDirection.In):Play()
+    tween(outerGlow, 0.3, {BackgroundTransparency = 1}):Play()
+    task.delay(0.35, function()
+        mainFrame.Visible = false
+        outerGlow.Visible = false
+    end)
+end
+
+closeBtn.MouseButton1Click:Connect(closeGUI)
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(0, 46, 0, 46)
+toggleBtn.Position = UDim2.new(1, -58, 1, -58)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+toggleBtn.Text = "MM2"
+toggleBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 11
+toggleBtn.BorderSizePixel = 0
+toggleBtn.AutoButtonColor = false
+toggleBtn.ZIndex = 10
+toggleBtn.Parent = screenGui
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 13)
+local toggleGrad = Instance.new("UIGradient", toggleBtn)
+toggleGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 100, 100)),
+})
+toggleGrad.Rotation = 135
+local toggleStroke = Instance.new("UIStroke", toggleBtn)
+toggleStroke.Color = Color3.fromRGB(255, 255, 255)
+toggleStroke.Thickness = 1.5
+toggleStroke.Transparency = 0.3
+
+toggleBtn.MouseEnter:Connect(function()
+    tween(toggleBtn, 0.15, {Size = UDim2.new(0,50,0,50), Position = UDim2.new(1,-60,1,-60)}):Play()
+    tween(toggleGrad, 0.15, {Rotation = 115}):Play()
+end)
+toggleBtn.MouseLeave:Connect(function()
+    tween(toggleBtn, 0.15, {Size = UDim2.new(0,46,0,46), Position = UDim2.new(1,-58,1,-58)}):Play()
+    tween(toggleGrad, 0.15, {Rotation = 135}):Play()
+end)
+toggleBtn.MouseButton1Click:Connect(function()
+    if isOpen then closeGUI() else openGUI() end
+end)
+local previewBtn = Instance.new("TextButton")
+previewBtn.Size = UDim2.new(0, 46, 0, 46)
+previewBtn.Position = UDim2.new(1, -58, 1, -110)
+previewBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+previewBtn.Text = "TRD"
+previewBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+previewBtn.Font = Enum.Font.GothamBold
+previewBtn.TextSize = 11
+previewBtn.BorderSizePixel = 0
+previewBtn.AutoButtonColor = false
+previewBtn.ZIndex = 10
+previewBtn.Parent = screenGui
+Instance.new("UICorner", previewBtn).CornerRadius = UDim.new(0, 13)
+local previewGrad = Instance.new("UIGradient", previewBtn)
+previewGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 100, 100)),
+})
+previewGrad.Rotation = 135
+local previewStroke = Instance.new("UIStroke", previewBtn)
+previewStroke.Color = Color3.fromRGB(255, 255, 255)
+previewStroke.Thickness = 1.5
+previewStroke.Transparency = 0.3
+
+previewBtn.MouseEnter:Connect(function()
+    tween(previewBtn, 0.15, {Size = UDim2.new(0,50,0,50), Position = UDim2.new(1,-60,1,-112)}):Play()
+    tween(previewGrad, 0.15, {Rotation = 115}):Play()
+end)
+previewBtn.MouseLeave:Connect(function()
+    tween(previewBtn, 0.15, {Size = UDim2.new(0,46,0,46), Position = UDim2.new(1,-58,1,-110)}):Play()
+    tween(previewGrad, 0.15, {Rotation = 135}):Play()
+end)
+
+local theirAddBtn = Instance.new("TextButton")
+theirAddBtn.Size = UDim2.new(0, 46, 0, 46)
+theirAddBtn.Position = UDim2.new(1, -58, 1, -162)
+theirAddBtn.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+theirAddBtn.Text = "THR"
+theirAddBtn.TextColor3 = Color3.fromRGB(10, 10, 10)
+theirAddBtn.Font = Enum.Font.GothamBold
+theirAddBtn.TextSize = 11
+theirAddBtn.BorderSizePixel = 0
+theirAddBtn.AutoButtonColor = false
+theirAddBtn.ZIndex = 10
+theirAddBtn.Parent = screenGui
+Instance.new("UICorner", theirAddBtn).CornerRadius = UDim.new(0, 13)
+local theirAddGrad = Instance.new("UIGradient", theirAddBtn)
+theirAddGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 100, 100)),
+})
+theirAddGrad.Rotation = 135
+local theirAddStroke = Instance.new("UIStroke", theirAddBtn)
+theirAddStroke.Color = Color3.fromRGB(255, 255, 255)
+theirAddStroke.Thickness = 1.5
+theirAddStroke.Transparency = 0.3
+
+theirAddBtn.MouseEnter:Connect(function()
+    tween(theirAddBtn, 0.15, {Size = UDim2.new(0,50,0,50), Position = UDim2.new(1,-60,1,-164)}):Play()
+    tween(theirAddGrad, 0.15, {Rotation = 115}):Play()
+end)
+theirAddBtn.MouseLeave:Connect(function()
+    tween(theirAddBtn, 0.15, {Size = UDim2.new(0,46,0,46), Position = UDim2.new(1,-58,1,-162)}):Play()
+    tween(theirAddGrad, 0.15, {Rotation = 135}):Play()
+end)
+theirAddBtn.MouseButton1Click:Connect(function()
+    if theirPickerFrame then
+        theirPickerFrame.Visible = not theirPickerFrame.Visible
+        if theirPickerFrame.Visible then
+            refreshTheirPicker("")
+        end
+    end
+end)
+
+theirPickerFrame = Instance.new("Frame")
+theirPickerFrame.Size = UDim2.new(0, 360, 0, 420)
+theirPickerFrame.Position = UDim2.new(0.5, -390, 0.5, -210)
+theirPickerFrame.BackgroundColor3 = COLORS.BG
+theirPickerFrame.BorderSizePixel = 0
+theirPickerFrame.ClipsDescendants = true
+theirPickerFrame.Visible = false
+theirPickerFrame.ZIndex = 20
+theirPickerFrame.Parent = screenGui
+Instance.new("UICorner", theirPickerFrame).CornerRadius = UDim.new(0, 18)
+local theirPickerBorder = Instance.new("UIStroke", theirPickerFrame)
+theirPickerBorder.Color = Color3.fromRGB(180, 180, 180)
+theirPickerBorder.Thickness = 1.5
+theirPickerBorder.Transparency = 0.35
+
+local theirPickerHeader = Instance.new("Frame")
+theirPickerHeader.Size = UDim2.new(1, 0, 0, 56)
+theirPickerHeader.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+theirPickerHeader.BorderSizePixel = 0
+theirPickerHeader.ZIndex = 21
+theirPickerHeader.Parent = theirPickerFrame
+Instance.new("UICorner", theirPickerHeader).CornerRadius = UDim.new(0, 18)
+
+local theirPickerHeaderFix = Instance.new("Frame")
+theirPickerHeaderFix.Size = UDim2.new(1, 0, 0, 18)
+theirPickerHeaderFix.Position = UDim2.new(0, 0, 1, -18)
+theirPickerHeaderFix.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+theirPickerHeaderFix.BorderSizePixel = 0
+theirPickerHeaderFix.ZIndex = 21
+theirPickerHeaderFix.Parent = theirPickerHeader
+makeDraggable(theirPickerHeader, theirPickerFrame)
+
+local theirPickerTitle = Instance.new("TextLabel")
+theirPickerTitle.Size = UDim2.new(0, 240, 0, 20)
+theirPickerTitle.Position = UDim2.new(0, 16, 0, 10)
+theirPickerTitle.BackgroundTransparency = 1
+theirPickerTitle.Text = "THEIR OFFER PICKER"
+theirPickerTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+theirPickerTitle.Font = Enum.Font.GothamBold
+theirPickerTitle.TextSize = 15
+theirPickerTitle.TextXAlignment = Enum.TextXAlignment.Left
+theirPickerTitle.ZIndex = 22
+theirPickerTitle.Parent = theirPickerHeader
+
+local theirPickerSub = Instance.new("TextLabel")
+theirPickerSub.Size = UDim2.new(0, 240, 0, 16)
+theirPickerSub.Position = UDim2.new(0, 16, 0, 30)
+theirPickerSub.BackgroundTransparency = 1
+theirPickerSub.Text = "Select an item, then add it locally"
+theirPickerSub.TextColor3 = COLORS.TextSub
+theirPickerSub.Font = Enum.Font.Gotham
+theirPickerSub.TextSize = 10
+theirPickerSub.TextXAlignment = Enum.TextXAlignment.Left
+theirPickerSub.ZIndex = 22
+theirPickerSub.Parent = theirPickerHeader
+
+local theirPickerClose = Instance.new("TextButton")
+theirPickerClose.Size = UDim2.new(0, 26, 0, 26)
+theirPickerClose.Position = UDim2.new(1, -38, 0.5, -13)
+theirPickerClose.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+theirPickerClose.BackgroundTransparency = 0.2
+theirPickerClose.Text = "X"
+theirPickerClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+theirPickerClose.Font = Enum.Font.GothamBold
+theirPickerClose.TextSize = 11
+theirPickerClose.BorderSizePixel = 0
+theirPickerClose.AutoButtonColor = false
+theirPickerClose.ZIndex = 22
+theirPickerClose.Parent = theirPickerHeader
+Instance.new("UICorner", theirPickerClose).CornerRadius = UDim.new(0, 7)
+
+local theirPickerCount = Instance.new("TextLabel")
+theirPickerCount.Size = UDim2.new(1, -24, 0, 18)
+theirPickerCount.Position = UDim2.new(0, 12, 0, 62)
+theirPickerCount.BackgroundTransparency = 1
+theirPickerCount.Text = "All items"
+theirPickerCount.TextColor3 = COLORS.TextDim
+theirPickerCount.Font = Enum.Font.GothamBold
+theirPickerCount.TextSize = 11
+theirPickerCount.TextXAlignment = Enum.TextXAlignment.Left
+theirPickerCount.ZIndex = 21
+theirPickerCount.Parent = theirPickerFrame
+
+local theirSearchOuter = Instance.new("Frame")
+theirSearchOuter.Size = UDim2.new(1, -24, 0, 34)
+theirSearchOuter.Position = UDim2.new(0, 12, 0, 84)
+theirSearchOuter.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+theirSearchOuter.BackgroundTransparency = 0.85
+theirSearchOuter.BorderSizePixel = 0
+theirSearchOuter.ZIndex = 21
+theirSearchOuter.Parent = theirPickerFrame
+Instance.new("UICorner", theirSearchOuter).CornerRadius = UDim.new(0, 10)
+local theirSearchStroke = Instance.new("UIStroke", theirSearchOuter)
+theirSearchStroke.Color = COLORS.Border
+theirSearchStroke.Thickness = 1
+theirSearchStroke.Transparency = 0.4
+
+local theirSearchBox = Instance.new("TextBox")
+theirSearchBox.Size = UDim2.new(1, -38, 1, 0)
+theirSearchBox.Position = UDim2.new(0, 30, 0, 0)
+theirSearchBox.BackgroundTransparency = 1
+theirSearchBox.Text = ""
+theirSearchBox.PlaceholderText = "Search items..."
+theirSearchBox.PlaceholderColor3 = COLORS.TextDim
+theirSearchBox.TextColor3 = COLORS.Text
+theirSearchBox.Font = Enum.Font.Gotham
+theirSearchBox.TextSize = 13
+theirSearchBox.TextXAlignment = Enum.TextXAlignment.Left
+theirSearchBox.ClearTextOnFocus = false
+theirSearchBox.ZIndex = 22
+theirSearchBox.Parent = theirSearchOuter
+
+local theirSearchIcon = Instance.new("TextLabel")
+theirSearchIcon.Size = UDim2.new(0, 24, 1, 0)
+theirSearchIcon.Position = UDim2.new(0, 2, 0, 0)
+theirSearchIcon.BackgroundTransparency = 1
+theirSearchIcon.Text = "S"
+theirSearchIcon.TextColor3 = COLORS.TextDim
+theirSearchIcon.Font = Enum.Font.GothamBold
+theirSearchIcon.TextSize = 13
+theirSearchIcon.ZIndex = 22
+theirSearchIcon.Parent = theirSearchOuter
+
+local theirScroll = Instance.new("ScrollingFrame")
+theirScroll.Size = UDim2.new(1, -24, 0, 236)
+theirScroll.Position = UDim2.new(0, 12, 0, 126)
+theirScroll.BackgroundColor3 = COLORS.Panel
+theirScroll.BorderSizePixel = 0
+theirScroll.ScrollBarThickness = 4
+theirScroll.ScrollBarImageColor3 = Color3.fromRGB(180, 180, 180)
+theirScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+theirScroll.ClipsDescendants = true
+theirScroll.ZIndex = 21
+theirScroll.Parent = theirPickerFrame
+Instance.new("UICorner", theirScroll).CornerRadius = UDim.new(0, 12)
+local theirScrollStroke = Instance.new("UIStroke", theirScroll)
+theirScrollStroke.Color = COLORS.Border
+theirScrollStroke.Thickness = 1
+theirScrollStroke.Transparency = 0.4
+
+local theirLayout = Instance.new("UIListLayout", theirScroll)
+theirLayout.Padding = UDim.new(0, 4)
+theirLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local theirPad = Instance.new("UIPadding", theirScroll)
+theirPad.PaddingTop = UDim.new(0, 6)
+theirPad.PaddingBottom = UDim.new(0, 6)
+theirPad.PaddingLeft = UDim.new(0, 6)
+theirPad.PaddingRight = UDim.new(0, 10)
+
+local theirButtons = {}
+
+refreshTheirPicker = function(text)
+    text = (text or theirSearchBox.Text or ""):lower()
+    local visible = 0
+    for _, d in ipairs(theirButtons) do
+        local show = text == "" or d.item.custom:lower():find(text, 1, true)
+        d.row.Visible = show
+        if show then
+            visible += 1
+            d.row.LayoutOrder = visible
+        end
+    end
+    theirScroll.CanvasSize = UDim2.new(0, 0, 0, visible * 40 + 12)
+    theirPickerCount.Text = visible == #items and ("All items  |  " .. #items .. " total") or (visible .. " of " .. #items .. " found")
+end
+
+for i, item in ipairs(items) do
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = COLORS.Card
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.BorderSizePixel = 0
+    row.LayoutOrder = i
+    row.ClipsDescendants = true
+    row.ZIndex = 22
+    row.Parent = theirScroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+    local rowStroke = Instance.new("UIStroke", row)
+    rowStroke.Color = Color3.fromRGB(180, 180, 180)
+    rowStroke.Thickness = 1
+    rowStroke.Transparency = 1
+
+    local typeLabel, typeColor = getItemTypeLabel(item.custom)
+    local badge = Instance.new("TextLabel")
+    badge.Size = UDim2.new(0, 32, 0, 18)
+    badge.Position = UDim2.new(0, 7, 0.5, -9)
+    badge.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    badge.BackgroundTransparency = 0.3
+    badge.Text = typeLabel
+    badge.TextColor3 = typeColor
+    badge.Font = Enum.Font.GothamBold
+    badge.TextSize = 9
+    badge.ZIndex = 23
+    badge.Parent = row
+    Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 4)
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -120, 1, 0)
+    label.Position = UDim2.new(0, 46, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = item.custom
+    label.TextColor3 = COLORS.TextSub
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.ZIndex = 23
+    label.Parent = row
+
+    local selTag = Instance.new("Frame")
+    selTag.Size = UDim2.new(0, 62, 0, 20)
+    selTag.Position = UDim2.new(1, -68, 0.5, -10)
+    selTag.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+    selTag.BackgroundTransparency = 1
+    selTag.BorderSizePixel = 0
+    selTag.ZIndex = 23
+    selTag.Parent = row
+    Instance.new("UICorner", selTag).CornerRadius = UDim.new(0, 5)
+    local selTagText = Instance.new("TextLabel")
+    selTagText.Size = UDim2.new(1, 0, 1, 0)
+    selTagText.BackgroundTransparency = 1
+    selTagText.Text = "SELECT"
+    selTagText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    selTagText.Font = Enum.Font.GothamBold
+    selTagText.TextSize = 9
+    selTagText.TextTransparency = 1
+    selTagText.ZIndex = 24
+    selTagText.Parent = selTag
+
+    row.MouseButton1Click:Connect(function()
+        for _, d in ipairs(theirButtons) do
+            tween(d.row, 0.18, {BackgroundColor3 = COLORS.Card}):Play()
+            tween(d.label, 0.18, {TextColor3 = COLORS.TextSub}):Play()
+            tween(d.selTag, 0.18, {BackgroundTransparency = 1}):Play()
+            tween(d.selTagText, 0.18, {TextTransparency = 1}):Play()
+        end
+        selectedTheirItem = item
+        tween(row, 0.18, {BackgroundColor3 = Color3.fromRGB(35, 35, 35)}):Play()
+        tween(label, 0.18, {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+        tween(selTag, 0.18, {BackgroundTransparency = 0.75}):Play()
+        tween(selTagText, 0.18, {TextTransparency = 0}):Play()
+    end)
+
+    table.insert(theirButtons, {
+        row = row,
+        label = label,
+        selTag = selTag,
+        selTagText = selTagText,
+        item = item,
+    })
+end
+
+local theirPickerAdd = Instance.new("TextButton")
+theirPickerAdd.Size = UDim2.new(1, -24, 0, 42)
+theirPickerAdd.Position = UDim2.new(0, 12, 1, -76)
+theirPickerAdd.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+theirPickerAdd.Text = "ADD TO THEIR"
+theirPickerAdd.TextColor3 = Color3.fromRGB(10, 10, 10)
+theirPickerAdd.Font = Enum.Font.GothamBold
+theirPickerAdd.TextSize = 12
+theirPickerAdd.BorderSizePixel = 0
+theirPickerAdd.AutoButtonColor = false
+theirPickerAdd.ZIndex = 22
+theirPickerAdd.Parent = theirPickerFrame
+Instance.new("UICorner", theirPickerAdd).CornerRadius = UDim.new(0, 12)
+
+local theirPickerClear = Instance.new("TextButton")
+theirPickerClear.Size = UDim2.new(1, -24, 0, 24)
+theirPickerClear.Position = UDim2.new(0, 12, 1, -30)
+theirPickerClear.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+theirPickerClear.Text = "CLEAR THEIR"
+theirPickerClear.TextColor3 = Color3.fromRGB(255, 255, 255)
+theirPickerClear.Font = Enum.Font.GothamBold
+theirPickerClear.TextSize = 10
+theirPickerClear.BorderSizePixel = 0
+theirPickerClear.AutoButtonColor = false
+theirPickerClear.ZIndex = 22
+theirPickerClear.Parent = theirPickerFrame
+Instance.new("UICorner", theirPickerClear).CornerRadius = UDim.new(0, 8)
+
+theirPickerClose.MouseButton1Click:Connect(function()
+    theirPickerFrame.Visible = false
+end)
+
+theirSearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    refreshTheirPicker(theirSearchBox.Text)
+end)
+
+theirPickerAdd.MouseButton1Click:Connect(function()
+    if not selectedTheirItem then
+        showToast("Select an item first!", true)
+        return
+    end
+    local ok = OfferTheirItemLocal(selectedTheirItem.custom, "Weapons")
+    if ok then
+        showToast(selectedTheirItem.custom .. " added to TheirOffer!")
+    else
+        showToast("Local trade slots are full.", true)
+    end
+end)
+
+theirPickerClear.MouseButton1Click:Connect(function()
+    ClearTheirLocalTrade()
+end)
+
+refreshTheirPicker("")
+
+previewFrame = Instance.new("Frame")
+previewFrame.Size = UDim2.new(0, 320, 0, 330)
+previewFrame.Position = UDim2.new(1, -350, 0.5, -165)
+previewFrame.BackgroundColor3 = COLORS.BG
+previewFrame.BorderSizePixel = 0
+previewFrame.ClipsDescendants = true
+previewFrame.Visible = false
+previewFrame.ZIndex = 20
+previewFrame.Parent = screenGui
+Instance.new("UICorner", previewFrame).CornerRadius = UDim.new(0, 18)
+local previewBorder = Instance.new("UIStroke", previewFrame)
+previewBorder.Color = Color3.fromRGB(180, 180, 180)
+previewBorder.Thickness = 1.5
+previewBorder.Transparency = 0.35
+
+local previewHeader = Instance.new("Frame")
+previewHeader.Size = UDim2.new(1, 0, 0, 56)
+previewHeader.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+previewHeader.BorderSizePixel = 0
+previewHeader.ZIndex = 21
+previewHeader.Parent = previewFrame
+Instance.new("UICorner", previewHeader).CornerRadius = UDim.new(0, 18)
+
+local previewHeaderFix = Instance.new("Frame")
+previewHeaderFix.Size = UDim2.new(1, 0, 0, 18)
+previewHeaderFix.Position = UDim2.new(0, 0, 1, -18)
+previewHeaderFix.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+previewHeaderFix.BorderSizePixel = 0
+previewHeaderFix.ZIndex = 21
+previewHeaderFix.Parent = previewHeader
+
+local previewTitle = Instance.new("TextLabel")
+previewTitle.Size = UDim2.new(0, 220, 0, 20)
+previewTitle.Position = UDim2.new(0, 16, 0, 10)
+previewTitle.BackgroundTransparency = 1
+previewTitle.Text = "LOCAL TRADE PREVIEW"
+previewTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+previewTitle.Font = Enum.Font.GothamBold
+previewTitle.TextSize = 15
+previewTitle.TextXAlignment = Enum.TextXAlignment.Left
+previewTitle.ZIndex = 22
+previewTitle.Parent = previewHeader
+
+local previewClose = Instance.new("TextButton")
+previewClose.Size = UDim2.new(0, 26, 0, 26)
+previewClose.Position = UDim2.new(1, -38, 0.5, -13)
+previewClose.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+previewClose.BackgroundTransparency = 0.2
+previewClose.Text = "X"
+previewClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+previewClose.Font = Enum.Font.GothamBold
+previewClose.TextSize = 11
+previewClose.BorderSizePixel = 0
+previewClose.AutoButtonColor = false
+previewClose.ZIndex = 22
+previewClose.Parent = previewHeader
+Instance.new("UICorner", previewClose).CornerRadius = UDim.new(0, 7)
+local previewCloseStroke = Instance.new("UIStroke", previewClose)
+previewCloseStroke.Color = COLORS.Error
+previewCloseStroke.Thickness = 1
+previewCloseStroke.Transparency = 0.5
+
+previewCountLabel = Instance.new("TextLabel")
+previewCountLabel.Size = UDim2.new(1, -24, 0, 18)
+previewCountLabel.Position = UDim2.new(0, 12, 0, 62)
+previewCountLabel.BackgroundTransparency = 1
+previewCountLabel.Text = "No local items yet"
+previewCountLabel.TextColor3 = COLORS.TextSub
+previewCountLabel.Font = Enum.Font.GothamBold
+previewCountLabel.TextSize = 11
+previewCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+previewCountLabel.ZIndex = 21
+previewCountLabel.Parent = previewFrame
+
+previewList = Instance.new("ScrollingFrame")
+previewList.Size = UDim2.new(1, -24, 1, -100)
+previewList.Position = UDim2.new(0, 12, 0, 86)
+previewList.BackgroundColor3 = COLORS.Panel
+previewList.BorderSizePixel = 0
+previewList.ScrollBarThickness = 4
+previewList.ScrollBarImageColor3 = Color3.fromRGB(180, 180, 180)
+previewList.CanvasSize = UDim2.new(0, 0, 0, 0)
+previewList.ClipsDescendants = true
+previewList.ZIndex = 21
+previewList.Parent = previewFrame
+Instance.new("UICorner", previewList).CornerRadius = UDim.new(0, 12)
+local previewListStroke = Instance.new("UIStroke", previewList)
+previewListStroke.Color = COLORS.Border
+previewListStroke.Thickness = 1
+previewListStroke.Transparency = 0.4
+
+local previewLayout = Instance.new("UIListLayout", previewList)
+previewLayout.Padding = UDim.new(0, 4)
+previewLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local previewPad = Instance.new("UIPadding", previewList)
+previewPad.PaddingTop = UDim.new(0, 6)
+previewPad.PaddingBottom = UDim.new(0, 6)
+previewPad.PaddingLeft = UDim.new(0, 6)
+previewPad.PaddingRight = UDim.new(0, 10)
+
+previewEmptyLabel = Instance.new("TextLabel")
+previewEmptyLabel.Size = UDim2.new(1, -24, 0, 24)
+previewEmptyLabel.Position = UDim2.new(0, 12, 0, 126)
+previewEmptyLabel.BackgroundTransparency = 1
+previewEmptyLabel.Text = "Spawn something to see it here."
+previewEmptyLabel.TextColor3 = COLORS.TextDim
+previewEmptyLabel.Font = Enum.Font.Gotham
+previewEmptyLabel.TextSize = 11
+previewEmptyLabel.ZIndex = 21
+previewEmptyLabel.Parent = previewFrame
+
+rebuildLocalTradePreview = function()
+    if not previewList or not previewCountLabel then
+        return
+    end
+
+    for _, child in ipairs(previewList:GetChildren()) do
+        if child:IsA("Frame") then
+            child:Destroy()
+        end
+    end
+
+    local entries = 0
+    local total = 0
+
+    for _, item in ipairs(items) do
+        local count = shared.MM2LocalTradeState.Weapons[item.original] or 0
+        if count > 0 then
+            entries += 1
+            total += count
+
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1, 0, 0, 34)
+            row.BackgroundColor3 = COLORS.Card
+            row.BorderSizePixel = 0
+            row.ZIndex = 22
+            row.Parent = previewList
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+            local rowStroke = Instance.new("UIStroke", row)
+            rowStroke.Color = Color3.fromRGB(180, 180, 180)
+            rowStroke.Thickness = 1
+            rowStroke.Transparency = 0.8
+
+            local typeLabel, typeColor = getItemTypeLabel(item.custom)
+            local badge = Instance.new("TextLabel")
+            badge.Size = UDim2.new(0, 32, 0, 18)
+            badge.Position = UDim2.new(0, 8, 0.5, -9)
+            badge.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+            badge.BackgroundTransparency = 0.2
+            badge.Text = typeLabel
+            badge.TextColor3 = typeColor
+            badge.Font = Enum.Font.GothamBold
+            badge.TextSize = 9
+            badge.ZIndex = 23
+            badge.Parent = row
+            Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 4)
+            local badgeStroke = Instance.new("UIStroke", badge)
+            badgeStroke.Color = typeColor
+            badgeStroke.Thickness = 1
+            badgeStroke.Transparency = 0.65
+
+            local nameLabel = Instance.new("TextLabel")
+            nameLabel.Size = UDim2.new(1, -120, 1, 0)
+            nameLabel.Position = UDim2.new(0, 48, 0, 0)
+            nameLabel.BackgroundTransparency = 1
+            nameLabel.Text = item.custom
+            nameLabel.TextColor3 = COLORS.Text
+            nameLabel.Font = Enum.Font.Gotham
+            nameLabel.TextSize = 12
+            nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+            nameLabel.ZIndex = 23
+            nameLabel.Parent = row
+
+            local countLabel = Instance.new("TextLabel")
+            countLabel.Size = UDim2.new(0, 42, 0, 18)
+            countLabel.Position = UDim2.new(1, -50, 0.5, -9)
+            countLabel.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+            countLabel.BackgroundTransparency = 0.15
+            countLabel.Text = "x" .. count
+            countLabel.TextColor3 = Color3.fromRGB(10, 10, 10)
+            countLabel.Font = Enum.Font.GothamBold
+            countLabel.TextSize = 11
+            countLabel.ZIndex = 23
+            countLabel.Parent = row
+            Instance.new("UICorner", countLabel).CornerRadius = UDim.new(0, 5)
+        end
+    end
+
+    previewCountLabel.Text = entries == 0
+        and "No local items yet"
+        or (entries .. " item types  |  " .. total .. " copies")
+    previewEmptyLabel.Visible = entries == 0
+    previewList.CanvasSize = UDim2.new(0, 0, 0, entries * 38 + 8)
+end
+
+shared.MM2RefreshTradeInventory = rebuildLocalTradePreview
+rebuildLocalTradePreview()
+
+previewClose.MouseButton1Click:Connect(function()
+    previewFrame.Visible = false
+end)
+
+previewBtn.MouseButton1Click:Connect(function()
+    previewFrame.Visible = not previewFrame.Visible
+    if previewFrame.Visible then
+        rebuildLocalTradePreview()
+    end
+end)
+
+makeDraggable(previewHeader, previewFrame)
+
+-- ═══════════════════════════════════════
+--    ФОНОВЫЕ АНИМАЦИИ ОСНОВНОГО GUI
+-- ═══════════════════════════════════════
+task.spawn(function()
+    local t = 0
+    while screenGui.Parent do
+        t += 0.03
+        orb1.BackgroundTransparency = 0.94 + math.sin(t * 0.8) * 0.03
+        orb2.BackgroundTransparency = 0.95 + math.cos(t * 0.6) * 0.03
+        orb3.BackgroundTransparency = 0.96 + math.sin(t * 1.1) * 0.02
+        if outerGlow.Visible then
+            outerGlow.BackgroundTransparency = 0.92 + math.sin(t * 1.4) * 0.03
+        end
+        iconGradient.Rotation = (iconGradient.Rotation + 0.4) % 360
+        task.wait(0.04)
+    end
+end)
+
+task.spawn(function()
+    while screenGui.Parent do
+        tween(neonLine, 1.3, {Size = UDim2.new(0, 88, 0, 2)}, Enum.EasingStyle.Sine):Play()
+        task.wait(1.3)
+        tween(neonLine, 1.3, {Size = UDim2.new(0, 38, 0, 2)}, Enum.EasingStyle.Sine):Play()
+        task.wait(1.3)
+    end
+end)
+
+filterItems("")
+
+-- ═══════════════════════════════════════
+--      ЗАПУСК ЗАГРУЗЧИКА
+-- ═══════════════════════════════════════
+task.spawn(function()
+    local loadingSteps = {
+        {text = "Loading modules...",      pct = 15},
+        {text = "Connecting to server...", pct = 32},
+        {text = "Fetching item list...",   pct = 55},
+        {text = "Building interface...",   pct = 74},
+        {text = "Applying monochrome theme...", pct = 90},
+        {text = "Ready!",                  pct = 100},
+    }
+    task.wait(0.15)
+
+    for stepIdx, step in ipairs(loadingSteps) do
+        local startPct = stepIdx == 1 and 0 or loadingSteps[stepIdx-1].pct
+        local endPct   = step.pct
+        local duration = stepIdx == #loadingSteps and 0.35 or 0.52
+
+        loaderStatus.Text = step.text
+
+        local t0 = tick()
+        while tick() - t0 < duration do
+            local p = (tick() - t0) / duration
+            p = p * p * (3 - 2 * p)
+            local cur = startPct + (endPct - startPct) * p
+            tween(loaderFill, 0.06, {Size = UDim2.new(cur/100, 0, 1, 0)}):Play()
+            loaderPct.Text = math.floor(cur) .. "%"
+            task.wait(0.04)
+        end
+        tween(loaderFill, 0.08, {Size = UDim2.new(endPct/100, 0, 1, 0)}):Play()
+        loaderPct.Text = endPct .. "%"
+
+        if stepIdx < #loadingSteps then task.wait(0.15) end
+    end
+
+    task.wait(0.3)
+
+    tween(loaderFill, 0.12, {BackgroundColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+    task.wait(0.18)
+
+    tween(loaderCenter, 0.35, {
+        Size = UDim2.new(0, 320, 0, 0),
+        Position = UDim2.new(0.5, -160, 0.5, 0),
+    }, Enum.EasingStyle.Back, Enum.EasingDirection.In):Play()
+    tween(cardGlow, 0.35, {BackgroundTransparency = 1}):Play()
+    tween(bgGlow,   0.35, {BackgroundTransparency = 1}):Play()
+    task.wait(0.38)
+
+    tween(loaderFrame, 0.3, {BackgroundTransparency = 1}):Play()
+    for _, child in pairs(loaderFrame:GetDescendants()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then
+            pcall(function()
+                tween(child, 0.2, {BackgroundTransparency = 1, TextTransparency = 1}):Play()
+            end)
+        end
+    end
+    task.wait(0.32)
+
+    loaderGui.Enabled = false
+    openGUI()
+end)
+
+
